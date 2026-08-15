@@ -38,11 +38,6 @@ struct Size {
     int w = 0;
 };
 
-struct Prepared {
-    VisionItem item;
-    std::vector<float> patches;
-};
-
 std::uint64_t checked_mul(std::uint64_t a, std::uint64_t b, std::string_view label) {
     if (a != 0 && b > std::numeric_limits<std::uint64_t>::max() / a) {
         throw std::invalid_argument(std::string(label) + " overflow");
@@ -223,14 +218,14 @@ void append_patch(const std::vector<const media::decode::Image*>& frames, int gr
 void add_budget(PreprocessStats& stats, const VisionItem& item);
 void enforce_budget(const PreprocessStats& stats, const ProcessorOptions& options);
 
-Prepared prepare_image(const ChatPart& part, const ProcessorOptions& options,
-                       const media::decode::Policy& policy, PreprocessStats& stats) {
+PreparedMedia prepare_image(const ChatPart& part, const ProcessorOptions& options,
+                            const media::decode::Policy& policy, PreprocessStats& stats) {
     media::decode::Image image = media::decode::decode_image(part.media.bytes, policy);
     const Size size = smart_resize_image(image.height, image.width, options.image_min_pixels,
                                          options.image_max_pixels);
     const int gh    = size.h / kPatch;
     const int gw    = size.w / kPatch;
-    Prepared out;
+    PreparedMedia out;
     out.item.modality = Modality::Image;
     out.item.grid     = {1, gh, gw};
     add_budget(stats, out.item);
@@ -251,8 +246,8 @@ Prepared prepare_image(const ChatPart& part, const ProcessorOptions& options,
     return out;
 }
 
-Prepared prepare_video(const ChatPart& part, const ProcessorOptions& options,
-                       const media::decode::Policy& policy, PreprocessStats& stats) {
+PreparedMedia prepare_video(const ChatPart& part, const ProcessorOptions& options,
+                            const media::decode::Policy& policy, PreprocessStats& stats) {
     media::decode::Video video =
         media::decode::decode_video(part.media.bytes, policy, options.video_fps,
                                     options.video_min_frames, options.video_max_frames);
@@ -263,7 +258,7 @@ Prepared prepare_video(const ChatPart& part, const ProcessorOptions& options,
     const int gt            = static_cast<int>((video.frames.size() + kTemporal - 1) / kTemporal);
     const int gh            = size.h / kPatch;
     const int gw            = size.w / kPatch;
-    Prepared out;
+    PreparedMedia out;
     out.item.modality = Modality::Video;
     out.item.grid     = {gt, gh, gw};
     add_budget(stats, out.item);
@@ -389,6 +384,28 @@ void add_budget(PreprocessStats& stats, const VisionItem& item) {
     stats.attention_pairs += checked_mul(static_cast<std::uint64_t>(item.grid.t),
                                          checked_mul(spatial, spatial, "vision attention pairs"),
                                          "vision attention pairs");
+}
+
+// Only the knobs that change preprocessed geometry belong here. The budget
+// limits gate acceptance rather than output, so folding them in would split the
+// cache for no reason -- count_tokens deliberately runs with a raised prompt
+// budget and must still hit the entries prepare() stored.
+std::uint64_t media_fingerprint(const ProcessorOptions& options, ChatPartKind kind) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto mix     = [&hash](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const std::uint8_t*>(data);
+        for (std::size_t i = 0; i < size; ++i) { hash = (hash ^ bytes[i]) * 1099511628211ULL; }
+    };
+    const auto kind_tag = static_cast<std::uint8_t>(kind);
+    mix(&kind_tag, sizeof(kind_tag));
+    mix(&options.image_min_pixels, sizeof(options.image_min_pixels));
+    mix(&options.image_max_pixels, sizeof(options.image_max_pixels));
+    mix(&options.video_min_pixels, sizeof(options.video_min_pixels));
+    mix(&options.video_max_pixels, sizeof(options.video_max_pixels));
+    mix(&options.video_fps, sizeof(options.video_fps));
+    mix(&options.video_min_frames, sizeof(options.video_min_frames));
+    mix(&options.video_max_frames, sizeof(options.video_max_frames));
+    return hash;
 }
 
 void enforce_budget(const PreprocessStats& stats, const ProcessorOptions& options) {
@@ -542,9 +559,47 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
     return encoded;
 }
 
+std::size_t MediaCache::KeyHash::operator()(const Key& key) const noexcept {
+    std::uint64_t hash = key.fingerprint;
+    for (const std::uint8_t byte : key.digest) { hash = (hash ^ byte) * 1099511628211ULL; }
+    return static_cast<std::size_t>(hash);
+}
+
+bool MediaCache::lookup(const Key& key, PreparedMedia& out) const {
+    if (capacity_bytes_ == 0) { return false; }
+    const std::lock_guard<std::mutex> guard(mutex_);
+    const auto found = index_.find(key);
+    if (found == index_.end()) { return false; }
+    entries_.splice(entries_.begin(), entries_, found->second);
+    out = found->second->value;
+    return true;
+}
+
+void MediaCache::store(const Key& key, const PreparedMedia& value) const {
+    const std::size_t bytes = value.patches.size() * sizeof(float);
+    // An item larger than the whole budget would evict everything and then not
+    // fit, so leave the cache untouched rather than thrash it.
+    if (capacity_bytes_ == 0 || bytes == 0 || bytes > capacity_bytes_) { return; }
+    const std::lock_guard<std::mutex> guard(mutex_);
+    if (const auto found = index_.find(key); found != index_.end()) {
+        entries_.splice(entries_.begin(), entries_, found->second);
+        return;
+    }
+    while (used_bytes_ + bytes > capacity_bytes_ && !entries_.empty()) {
+        const Entry& victim = entries_.back();
+        used_bytes_ -= victim.bytes;
+        index_.erase(victim.key);
+        entries_.pop_back();
+    }
+    entries_.push_front(Entry{.key = key, .value = value, .bytes = bytes});
+    index_.emplace(key, entries_.begin());
+    used_bytes_ += bytes;
+}
+
 Processor::Processor(const Tokenizer& tokenizer, const CompiledChatTemplate& chat_template,
-                     ProcessorOptions options)
-    : tokenizer_(tokenizer), chat_template_(chat_template), options_(std::move(options)) {
+                     ProcessorOptions options, const MediaCache* media_cache)
+    : tokenizer_(tokenizer), chat_template_(chat_template), options_(std::move(options)),
+      media_cache_(media_cache) {
     if (options_.max_media_items == 0 || options_.max_prompt_tokens == 0 ||
         options_.max_media_bytes == 0 || options_.max_decoded_pixels == 0 ||
         options_.max_decoded_video_pixels == 0 || options_.image_min_pixels == 0 ||
@@ -580,18 +635,29 @@ ProcessedInput Processor::process(const std::vector<ChatMessage>& messages,
     PreprocessStats stats;
     stats.media_items = parts.size();
     for (const ChatPart* part : parts) {
-        Prepared media;
-        try {
-            media = part->kind == ChatPartKind::Image
-                        ? prepare_image(*part, options_, policy, stats)
-                        : prepare_video(*part, options_, policy, stats);
-        } catch (const media::decode::Error& error) {
-            if (error.kind() == media::decode::ErrorKind::BudgetExceeded) {
-                throw ProcessorError(ProcessorErrorKind::BudgetExceeded, error.what());
+        const Sha256Digest digest = sha256(part->media.bytes);
+        const MediaCache::Key key{.digest      = digest,
+                                  .fingerprint = media_fingerprint(options_, part->kind)};
+        PreparedMedia media;
+        if (media_cache_ != nullptr && media_cache_->lookup(key, media)) {
+            // prepare_* charges the budget as it goes, so replay it here: a cached
+            // item has to be rejected exactly where a freshly decoded one would.
+            add_budget(stats, media.item);
+            enforce_budget(stats, options_);
+        } else {
+            try {
+                media = part->kind == ChatPartKind::Image
+                            ? prepare_image(*part, options_, policy, stats)
+                            : prepare_video(*part, options_, policy, stats);
+            } catch (const media::decode::Error& error) {
+                if (error.kind() == media::decode::ErrorKind::BudgetExceeded) {
+                    throw ProcessorError(ProcessorErrorKind::BudgetExceeded, error.what());
+                }
+                throw;
             }
-            throw;
+            if (media_cache_ != nullptr) { media_cache_->store(key, media); }
         }
-        media.item.content_digest = sha256(part->media.bytes);
+        media.item.content_digest = digest;
         if (media.patches.size() % kPatchFeatures != 0) {
             throw std::logic_error("preprocessed patch buffer is not row aligned");
         }

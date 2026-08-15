@@ -6,10 +6,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <list>
+#include <mutex>
 #include <span>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -67,6 +70,56 @@ struct PreprocessStats {
     [[nodiscard]] std::string summary() const;
 };
 
+// One media part after decode, resize and patchification.
+struct PreparedMedia {
+    VisionItem item;
+    std::vector<float> patches;
+};
+
+// LRU over preprocessed media, keyed by the digest of the source bytes.
+//
+// Decoding one screenshot costs on the order of a second of CPU, and an agentic
+// conversation resends every image it has ever read on every turn -- so without
+// this the cost is paid again on each request, long after the KV cache stopped
+// having to prefill any of those tokens. Methods are const and internally
+// locked: the cache lives in a shared const Frontend::Impl.
+class MediaCache {
+public:
+    struct Key {
+        std::array<std::uint8_t, 32> digest{};
+        // Covers the processor knobs that change output geometry, so a
+        // reconfigured server cannot be served stale patches.
+        std::uint64_t fingerprint = 0;
+
+        [[nodiscard]] bool operator==(const Key& other) const noexcept {
+            return digest == other.digest && fingerprint == other.fingerprint;
+        }
+    };
+
+    explicit MediaCache(std::size_t capacity_bytes) noexcept : capacity_bytes_(capacity_bytes) {}
+
+    [[nodiscard]] bool lookup(const Key& key, PreparedMedia& out) const;
+    void store(const Key& key, const PreparedMedia& value) const;
+
+private:
+    struct Entry {
+        Key key;
+        PreparedMedia value;
+        std::size_t bytes = 0;
+    };
+
+    struct KeyHash {
+        [[nodiscard]] std::size_t operator()(const Key& key) const noexcept;
+    };
+
+    std::size_t capacity_bytes_;
+    mutable std::mutex mutex_;
+    // Front is the most recently used entry.
+    mutable std::list<Entry> entries_;
+    mutable std::unordered_map<Key, std::list<Entry>::iterator, KeyHash> index_;
+    mutable std::size_t used_bytes_ = 0;
+};
+
 struct ProcessorOptions {
     std::uint64_t image_min_pixels         = 32ULL * 32ULL;
     std::uint64_t image_max_pixels         = 1024ULL * 1024ULL;
@@ -112,7 +165,7 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
 class Processor {
 public:
     Processor(const Tokenizer& tokenizer, const CompiledChatTemplate& chat_template,
-              ProcessorOptions options = {});
+              ProcessorOptions options = {}, const MediaCache* media_cache = nullptr);
 
     ProcessedInput process(const std::vector<ChatMessage>& messages,
                            ChatRenderOptions render_options = {}) const;
@@ -121,6 +174,7 @@ private:
     const Tokenizer& tokenizer_;
     const CompiledChatTemplate& chat_template_;
     ProcessorOptions options_;
+    const MediaCache* media_cache_ = nullptr;
 };
 
 } // namespace ninfer::targets::qwen3_6::frontend_internal

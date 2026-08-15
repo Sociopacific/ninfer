@@ -140,6 +140,12 @@ void validate_pixel_pipeline(const Json& config, std::string_view resource) {
     }
 }
 
+// Preprocessed media is reused across turns: an agent conversation resends every
+// screenshot it has read on every request, and decoding one costs about a second
+// of CPU. 4 GiB holds roughly eighty 1600x1200 screenshots, well past the 16-item
+// per-request limit. It is a ceiling, not a reservation.
+constexpr std::size_t kMediaCacheBytes = 4ULL << 30;
+
 fi::ProcessorOptions processor_options(const FrontendResources& resources) {
     const Json image =
         parse_resource_json(resources.preprocessor_config_json, "preprocessor_config.json");
@@ -599,7 +605,8 @@ public:
               fi::TokenizerResources{.tokenizer_json         = resources.tokenizer_json,
                                      .tokenizer_config_json  = resources.tokenizer_config_json,
                                      .generation_config_json = resources.generation_config_json})),
-          processor(processor_options(resources)), vision_enabled(vision_enabled_) {
+          processor(processor_options(resources)), media_cache(kMediaCacheBytes),
+          vision_enabled(vision_enabled_) {
         if (registered_checkpoint) { validate_registered_tokenizer(*tokenizer); }
         for (const int token : tokenizer->default_stop_token_ids()) {
             if (!tokenizer->is_valid_token(token)) {
@@ -613,6 +620,7 @@ public:
     fi::CompiledChatTemplate chat_template;
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     fi::ProcessorOptions processor;
+    fi::MediaCache media_cache;
     StopPolicy defaults;
     bool vision_enabled = true;
 };
@@ -846,7 +854,8 @@ PreparedPrompt Frontend::prepare(PromptInput input) const {
     if (has_media) {
         fi::ProcessorOptions processor_options = impl_->processor;
         processor_options.max_prompt_tokens    = std::numeric_limits<std::size_t>::max();
-        fi::Processor processor(*impl_->tokenizer, impl_->chat_template, processor_options);
+        fi::Processor processor(*impl_->tokenizer, impl_->chat_template, processor_options,
+                                &impl_->media_cache);
         fi::ProcessedInput processed;
         try {
             processed = processor.process(messages, render_options(options));
@@ -898,7 +907,8 @@ std::uint32_t Frontend::count_tokens(PromptInput input) const {
 
     fi::ProcessorOptions processor_options = impl_->processor;
     processor_options.max_prompt_tokens    = std::numeric_limits<std::size_t>::max();
-    fi::Processor processor(*impl_->tokenizer, impl_->chat_template, processor_options);
+    fi::Processor processor(*impl_->tokenizer, impl_->chat_template, processor_options,
+                            &impl_->media_cache);
     try {
         return checked_token_count(
             processor.process(messages, render_options(options)).input_ids.size());
