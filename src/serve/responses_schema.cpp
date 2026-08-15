@@ -573,6 +573,7 @@ void reject_unknown_top_level(const Json& body) {
     static const std::unordered_set<std::string> allowed = {
         "background",
         "chat_template_kwargs",
+        "client_metadata",
         "context_management",
         "conversation",
         "include",
@@ -614,8 +615,8 @@ void reject_unknown_top_level(const Json& body) {
 
 void reject_server_managed_features(const Json& body) {
     for (const char* key : {"context_management", "conversation", "max_tool_calls", "moderation",
-                            "prompt", "prompt_cache_key", "prompt_cache_options",
-                            "prompt_cache_retention", "safety_identifier", "user"}) {
+                            "prompt", "prompt_cache_options", "prompt_cache_retention",
+                            "safety_identifier", "user"}) {
         if (body.contains(key) && !body.at(key).is_null()) {
             bad_request(std::string(key) + " is not supported", key, "parameter_not_supported");
         }
@@ -640,10 +641,9 @@ void reject_server_managed_features(const Json& body) {
         if (!body.at("parallel_tool_calls").is_boolean()) {
             bad_request("parallel_tool_calls must be a boolean", "parallel_tool_calls");
         }
-        if (!body.at("parallel_tool_calls").get<bool>()) {
-            bad_request("parallel_tool_calls=false cannot be enforced", "parallel_tool_calls",
-                        "parallel_tool_calls_not_supported");
-        }
+        // false is accepted but not honoured: nothing here holds the model to a single
+        // tool call per turn. Rejecting it is the more honest answer, and it also shuts
+        // out every client that sends false unconditionally -- Codex CLI among them.
     }
     if (body.contains("top_logprobs") && !body.at("top_logprobs").is_null()) {
         const std::optional<int> value = optional_int(body, "top_logprobs");
