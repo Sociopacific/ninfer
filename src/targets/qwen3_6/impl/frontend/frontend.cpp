@@ -844,7 +844,9 @@ PreparedPrompt Frontend::prepare(PromptInput input) const {
     auto prepared              = std::make_unique<PreparedPromptData>();
     PreparedPromptData& result = *prepared;
     if (has_media) {
-        fi::Processor processor(*impl_->tokenizer, impl_->chat_template, impl_->processor);
+        fi::ProcessorOptions processor_options = impl_->processor;
+        processor_options.max_prompt_tokens    = std::numeric_limits<std::size_t>::max();
+        fi::Processor processor(*impl_->tokenizer, impl_->chat_template, processor_options);
         fi::ProcessedInput processed;
         try {
             processed = processor.process(messages, render_options(options));

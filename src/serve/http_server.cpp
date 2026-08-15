@@ -186,6 +186,10 @@ void HttpServer::stop_stats_reporter() {
 void HttpServer::register_routes() {
     server_.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
         if (res.status != 413) { return; }
+        // A 413 raised by a route handler (media and prompt budgets) already carries
+        // its own message; only synthesise one for httplibs own payload rejection,
+        // which leaves the body empty.
+        if (!res.body.empty()) { return; }
         ApiError error;
         error.status  = 413;
         error.type    = "invalid_request_error";
