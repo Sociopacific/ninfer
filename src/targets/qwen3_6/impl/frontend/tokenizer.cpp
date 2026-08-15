@@ -642,16 +642,32 @@ std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options)
     }
 
     std::vector<int> ids;
+    // Remember where each added token was last found. Occurrences only ever move
+    // forward, so a cached position at or after the cursor is still the leftmost
+    // one and needs no rescan. Without this the scan is quadratic, and vision
+    // placeholders make that bite: expand_placeholders turns one <|image_pad|>
+    // into thousands of copies, so every one of them used to re-search the whole
+    // remaining prompt with every added token in the vocabulary.
+    std::vector<std::size_t> next_match(added_tokens_.size(), std::string_view::npos);
+    for (std::size_t i = 0; i < added_tokens_.size(); ++i) {
+        if (added_tokens_[i].content.empty()) { continue; }
+        next_match[i] = text.find(added_tokens_[i].content, 0);
+    }
+
     std::size_t pos = 0;
     while (pos < text.size()) {
         std::size_t match_pos         = std::string_view::npos;
         const AddedToken* match_token = nullptr;
-        for (const AddedToken& token : added_tokens_) {
+        for (std::size_t i = 0; i < added_tokens_.size(); ++i) {
+            const AddedToken& token = added_tokens_[i];
             if (token.content.empty()) { continue; }
-            const std::size_t found = text.find(token.content, pos);
-            if (found == std::string_view::npos) { continue; }
-            if (match_token == nullptr || found < match_pos) {
-                match_pos   = found;
+            if (next_match[i] == std::string_view::npos) { continue; }
+            if (next_match[i] < pos) {
+                next_match[i] = text.find(token.content, pos);
+                if (next_match[i] == std::string_view::npos) { continue; }
+            }
+            if (match_token == nullptr || next_match[i] < match_pos) {
+                match_pos   = next_match[i];
                 match_token = &token;
             }
         }
