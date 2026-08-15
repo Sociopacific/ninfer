@@ -312,12 +312,20 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
 
     std::size_t num_sys = 0;
     std::string merged_system;
-    if (messages[0].role == "system") {
-        if (messages[0].has_media()) {
+    // A leading run of system messages is legitimate, not a malformed request: the
+    // Responses API turns `instructions` into one and a `developer` message into
+    // another, and both land before the first user turn. Merge the whole run the
+    // same way the tools block merges system text into itself.
+    while (num_sys < messages.size() && messages[num_sys].role == "system") {
+        if (messages[num_sys].has_media()) {
             throw std::invalid_argument("system message cannot contain images or videos");
         }
-        merged_system = trim_ascii_whitespace(messages[0].rendered_content());
-        num_sys       = 1;
+        const std::string content = trim_ascii_whitespace(messages[num_sys].rendered_content());
+        if (!content.empty()) {
+            if (!merged_system.empty()) { merged_system += "\n\n"; }
+            merged_system += content;
+        }
+        ++num_sys;
     }
 
     std::string rendered;
@@ -325,7 +333,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     if (has_tools) {
         rendered +=
             render_tools_system_block(options.tool_jsons, merged_system, reasoning_instructions);
-    } else if (num_sys == 1) {
+    } else if (num_sys > 0) {
         if (!effort_template || !merged_system.empty() || !reasoning_instructions.empty()) {
             rendered += "<|im_start|>system\n";
             if (!reasoning_instructions.empty()) {
