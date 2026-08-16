@@ -6,7 +6,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <list>
 #include <mutex>
 #include <span>
@@ -131,15 +130,17 @@ struct ProcessorOptions {
     std::uint64_t max_decoded_video_pixels = 128ULL * 1024ULL * 1024ULL;
     int max_video_source_frames            = 100'000;
     double max_video_duration_seconds      = 600.0;
-    // Cumulative media budgets are non-binding: a request is bounded by the
-    // context it has to fit in, the way a cloud endpoint bounds one. What still
-    // binds is per item -- image_max_pixels caps a single image, and the Program
-    // workspace envelope is checked per vision item rather than over their sum.
-    std::size_t max_media_items            = std::numeric_limits<std::size_t>::max();
-    std::uint64_t max_raw_patches          = std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t max_vision_tokens        = std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t max_attention_pairs      = std::numeric_limits<std::uint64_t>::max();
-    std::size_t max_prompt_tokens          = 32'768;
+    // These three bound the request, not one item, and they are load-bearing: the
+    // vision workspace is sized once per Program from kFrontendMergedLimit, which
+    // is this same 32768, and max_raw_patches is the same ceiling counted in
+    // patches. Relaxing them does not fail cleanly -- the encode runs past a
+    // buffer that was never sized for the sum and corrupts the heap. The
+    // per-item check in request_plan_impl.h bounds one item and does not cover
+    // this. To fit more images in a request, lower the cost of an image
+    // (kImagePixelPolicyCeiling in frontend.cpp), never raise these.
+    std::size_t max_media_items            = 16;
+    std::uint64_t max_raw_patches          = 131'072;
+    std::uint64_t max_vision_tokens        = 32'768;
     double video_fps                       = 2.0;
     int video_min_frames                   = 4;
     int video_max_frames                   = 768;
@@ -154,7 +155,7 @@ struct ProcessedInput {
     // Row-major [sum(raw_patches), 1536], in the exact merger-friendly order.
     std::vector<float> patches;
     std::vector<VisionItem> vision_items;
-    std::optional<std::uint32_t> turn_rewrite_boundary;
+    std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
     PreprocessStats stats;
 
     [[nodiscard]] std::span<const std::int32_t> position_axis(int axis) const;
@@ -162,7 +163,7 @@ struct ProcessedInput {
 
 struct EncodedChat {
     std::vector<int> input_ids;
-    std::optional<std::uint32_t> turn_rewrite_boundary;
+    std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
 };
 
 EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered);

@@ -61,6 +61,41 @@ struct MediaInputPermit {
     std::shared_ptr<MediaInputCapacity> capacity;
 };
 
+ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
+    ApiError error;
+    error.param   = "messages";
+    error.message = exception.what();
+    switch (exception.kind()) {
+    case ninfer::RequestErrorKind::ContextLengthExceeded:
+        error.status = 400;
+        error.code   = "context_length_exceeded";
+        break;
+    case ninfer::RequestErrorKind::MediaBudgetExceeded:
+        error.status = 400;
+        error.code   = "media_budget_exceeded";
+        break;
+    case ninfer::RequestErrorKind::Overloaded:
+        error.param.clear();
+        error.status = 429;
+        error.type   = "rate_limit_error";
+        error.code   = "server_overloaded";
+        break;
+    case ninfer::RequestErrorKind::QueueTimeout:
+        error.param.clear();
+        error.status = 503;
+        error.type   = "server_error";
+        error.code   = "request_queue_timeout";
+        break;
+    case ninfer::RequestErrorKind::Unavailable:
+        error.param.clear();
+        error.status = 503;
+        error.type   = "server_error";
+        error.code   = "service_unavailable";
+        break;
+    }
+    return error;
+}
+
 namespace {
 
 // No cap on how many images a request may carry: the context it has to fit in is
@@ -77,7 +112,7 @@ using Clock = std::chrono::steady_clock;
     error.message = exception.what();
     switch (exception.kind()) {
     case ninfer::product::media_acquire::ErrorKind::BudgetExceeded:
-        error.status = 413;
+        error.status = 400;
         error.code   = "media_budget_exceeded";
         break;
     case ninfer::product::media_acquire::ErrorKind::RemoteUnavailable:
@@ -118,16 +153,6 @@ using Clock = std::chrono::steady_clock;
     error.code    = "client_disconnected";
     error.message = "client disconnected during media preparation";
     throw ApiException(std::move(error));
-}
-
-std::size_t media_item_count(const GenerationRequest& request) {
-    std::size_t count = 0;
-    for (const ChatTurn& message : request.messages) {
-        for (const ContentPart& part : message.content) {
-            if (part.kind == ContentKind::Image || part.kind == ContentKind::Video) { ++count; }
-        }
-    }
-    return count;
 }
 
 ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point deadline,
@@ -171,38 +196,7 @@ ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point dead
 }
 
 [[noreturn]] void throw_request_error(const ninfer::RequestError& exception) {
-    ApiError error;
-    error.param   = "messages";
-    error.message = exception.what();
-    switch (exception.kind()) {
-    case ninfer::RequestErrorKind::ContextLengthExceeded:
-        error.status = 400;
-        error.code   = "context_length_exceeded";
-        break;
-    case ninfer::RequestErrorKind::MediaBudgetExceeded:
-        error.status = 413;
-        error.code   = "media_budget_exceeded";
-        break;
-    case ninfer::RequestErrorKind::Overloaded:
-        error.param.clear();
-        error.status = 429;
-        error.type   = "rate_limit_error";
-        error.code   = "server_overloaded";
-        break;
-    case ninfer::RequestErrorKind::QueueTimeout:
-        error.param.clear();
-        error.status = 503;
-        error.type   = "server_error";
-        error.code   = "request_queue_timeout";
-        break;
-    case ninfer::RequestErrorKind::Unavailable:
-        error.param.clear();
-        error.status = 503;
-        error.type   = "server_error";
-        error.code   = "service_unavailable";
-        break;
-    }
-    throw ApiException(std::move(error));
+    throw ApiException(request_error_to_api_error(exception));
 }
 
 void check_preparation_control(Clock::time_point deadline,
@@ -343,7 +337,7 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
     prepared.enable_thinking                   = semantics.enable_thinking;
     prepared.preserve_thinking                 = semantics.preserve_thinking;
     prepared.preserve_thinking_semantic_change = request.preserve_thinking_semantic_change;
-    const bool request_has_media               = media_item_count(request) != 0;
+    const bool request_has_media               = request.media_item_count() != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
@@ -378,7 +372,7 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
-    const bool request_has_media = media_item_count(request) != 0;
+    const bool request_has_media = request.media_item_count() != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
@@ -470,7 +464,7 @@ void GenerationService::warmup() {
     try {
         GenerationRequest request;
         ChatTurn turn;
-        turn.role = "user";
+        turn.role = ChatRole::User;
         ContentPart content;
         content.kind     = ContentKind::Text;
         content.text     = "hi";
