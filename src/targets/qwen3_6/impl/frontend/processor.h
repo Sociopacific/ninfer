@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <list>
 #include <mutex>
 #include <span>
@@ -130,10 +131,14 @@ struct ProcessorOptions {
     std::uint64_t max_decoded_video_pixels = 128ULL * 1024ULL * 1024ULL;
     int max_video_source_frames            = 100'000;
     double max_video_duration_seconds      = 600.0;
-    std::size_t max_media_items            = 16;
-    std::uint64_t max_raw_patches          = 131'072;
-    std::uint64_t max_vision_tokens        = 32'768;
-    std::uint64_t max_attention_pairs      = 1024ULL * 1024ULL * 1024ULL;
+    // Cumulative media budgets are non-binding: a request is bounded by the
+    // context it has to fit in, the way a cloud endpoint bounds one. What still
+    // binds is per item -- image_max_pixels caps a single image, and the Program
+    // workspace envelope is checked per vision item rather than over their sum.
+    std::size_t max_media_items            = std::numeric_limits<std::size_t>::max();
+    std::uint64_t max_raw_patches          = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t max_vision_tokens        = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t max_attention_pairs      = std::numeric_limits<std::uint64_t>::max();
     std::size_t max_prompt_tokens          = 32'768;
     double video_fps                       = 2.0;
     int video_min_frames                   = 4;

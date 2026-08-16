@@ -63,8 +63,11 @@ struct MediaInputPermit {
 
 namespace {
 
-using Clock                              = std::chrono::steady_clock;
-constexpr std::size_t kMaximumMediaItems = 16;
+// No cap on how many images a request may carry: the context it has to fit in is
+// the limit, and each image is clamped to the frontend's pixel ceiling on the way
+// in. An oversized conversation fails as context_length_exceeded, which is what it
+// actually is, rather than as a media-item count the caller cannot reason about.
+using Clock = std::chrono::steady_clock;
 
 [[noreturn]] void throw_preparation_cancelled();
 
@@ -340,15 +343,10 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
     prepared.enable_thinking                   = semantics.enable_thinking;
     prepared.preserve_thinking                 = semantics.preserve_thinking;
     prepared.preserve_thinking_semantic_change = request.preserve_thinking_semantic_change;
-    const std::size_t media_items              = media_item_count(request);
-    const bool request_has_media               = media_items != 0;
+    const bool request_has_media               = media_item_count(request) != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
-    }
-    if (media_items > kMaximumMediaItems) {
-        throw_request_error(ninfer::RequestError(RequestErrorKind::MediaBudgetExceeded,
-                                                 "request exceeds the 16-item media limit"));
     }
     prepared.lifetime = acquire_request_lifetime();
     HostInputLease host_input;
@@ -380,15 +378,10 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
-    const std::size_t media_items = media_item_count(request);
-    const bool request_has_media  = media_items != 0;
+    const bool request_has_media = media_item_count(request) != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
-    }
-    if (media_items > kMaximumMediaItems) {
-        throw_request_error(ninfer::RequestError(RequestErrorKind::MediaBudgetExceeded,
-                                                 "request exceeds the 16-item media limit"));
     }
     const Clock::time_point deadline =
         Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);

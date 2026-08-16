@@ -142,9 +142,19 @@ void validate_pixel_pipeline(const Json& config, std::string_view resource) {
 
 // Preprocessed media is reused across turns: an agent conversation resends every
 // screenshot it has read on every request, and decoding one costs about a second
-// of CPU. 4 GiB holds roughly eighty 1600x1200 screenshots, well past the 16-item
-// per-request limit. It is a ceiling, not a reservation.
+// of CPU. 4 GiB holds several hundred clamped screenshots. It is a ceiling, not a
+// reservation.
 constexpr std::size_t kMediaCacheBytes = 4ULL << 30;
+
+// preprocessor_config.json ships the model's *capability* ceiling -- longest_edge
+// there is large enough that a retina screenshot is never resized, so one image
+// costs 7625 tokens where the same screen at 1600x1200 costs 1965. A serving
+// endpoint wants a *policy* ceiling instead, which is what every hosted API
+// applies: fit-and-scale rather than reject. This is Qwen's own documented
+// default budget of 1280 visual tokens, and one visual token is 32x32 pixels.
+// Raising it makes single images sharper and fewer of them fit the context;
+// lowering it does the reverse. Nothing else in the pipeline reads it.
+constexpr std::uint64_t kImagePixelPolicyCeiling = 1280ULL * 32ULL * 32ULL;
 
 fi::ProcessorOptions processor_options(const FrontendResources& resources) {
     const Json image =
@@ -161,9 +171,10 @@ fi::ProcessorOptions processor_options(const FrontendResources& resources) {
     options.image_min_pixels =
         positive_u64(require_integer(image_size, "shortest_edge", "preprocessor_config.json.size"),
                      "image shortest_edge");
-    options.image_max_pixels =
+    options.image_max_pixels = std::min(
         positive_u64(require_integer(image_size, "longest_edge", "preprocessor_config.json.size"),
-                     "image longest_edge");
+                     "image longest_edge"),
+        kImagePixelPolicyCeiling);
     options.video_min_pixels = positive_u64(
         require_integer(video_size, "shortest_edge", "video_preprocessor_config.json.size"),
         "video shortest_edge");
