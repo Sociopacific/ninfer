@@ -130,14 +130,15 @@ struct ProcessorOptions {
     std::uint64_t max_decoded_video_pixels = 128ULL * 1024ULL * 1024ULL;
     int max_video_source_frames            = 100'000;
     double max_video_duration_seconds      = 600.0;
-    // These three bound the request, not one item, and they are load-bearing: the
-    // vision workspace is sized once per Program from kFrontendMergedLimit, which
-    // is this same 32768, and max_raw_patches is the same ceiling counted in
-    // patches. Relaxing them does not fail cleanly -- the encode runs past a
-    // buffer that was never sized for the sum and corrupts the heap. The
-    // per-item check in request_plan_impl.h bounds one item and does not cover
-    // this. To fit more images in a request, lower the cost of an image
-    // (kImagePixelPolicyCeiling in frontend.cpp), never raise these.
+    // These three bound the request as a whole, and unlike the per-item checks
+    // they are policy rather than buffer size: the vision workspace is sized for
+    // one item at a time (request_plan_impl.h sizes the transient from the
+    // largest single item, prepare_chunk encodes exactly one item per chunk, and
+    // both paths bounds-check that item on its own), and items already inside a
+    // reused prefix are not re-encoded at all. Upstream keeps them, so they stay
+    // here; but the cheap way to fit more images in a request is still to lower
+    // the cost of an image (kImagePixelPolicyCeiling in frontend.cpp) rather
+    // than to raise a ceiling whose real cost has not been measured.
     std::size_t max_media_items            = 16;
     std::uint64_t max_raw_patches          = 131'072;
     std::uint64_t max_vision_tokens        = 32'768;

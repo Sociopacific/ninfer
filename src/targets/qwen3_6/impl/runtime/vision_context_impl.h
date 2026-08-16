@@ -215,6 +215,19 @@ void VisionContext::encode(const VisionItemView& item, Tensor& output,
         output.ne[3] != 1 || !output.is_contiguous() || output.data == nullptr) {
         throw std::invalid_argument("Vision output must be contiguous BF16 [H,V]");
     }
+    // The copies below take their length from the layout, which is derived from the
+    // counts in the control, not from the vectors they read. The patch buffer is
+    // already checked above; check the four control vectors the same way, so a
+    // control whose extents disagree with its counts fails here instead of reading
+    // past the end of a host allocation.
+    if (control.position_ids.size() != checked_mul(patches64, 2, "position id elements") ||
+        control.position_table_indices.size() !=
+            checked_mul(patches64, 4, "position table index elements") ||
+        control.position_table_weights.size() !=
+            checked_mul(patches64, 4, "position table weight elements") ||
+        control.cu_seqlens.size() != static_cast<std::size_t>(control.segment_count) + 1) {
+        throw std::invalid_argument("Vision item control extents disagree with its counts");
+    }
     const VisionWorkspaceLayout layout = build_workspace_layout(
         patches64, tokens64, static_cast<std::size_t>(control.segment_count));
     if (workspace.capacity() < layout.bytes) {

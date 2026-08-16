@@ -834,6 +834,44 @@ int test_attention_pairs_are_diagnostic(const Frontend& frontend) {
     return failures;
 }
 
+int test_media_budget_rejects_cleanly(const Frontend& frontend) {
+    const auto images = [](int count) {
+        ninfer::ChatMessage message;
+        message.role = ninfer::ChatRole::User;
+        for (int index = 0; index < count; ++index) {
+            ninfer::MessagePart image;
+            image.kind       = ninfer::MessagePartKind::Media;
+            image.media.kind = ninfer::MediaKind::Image;
+            // Distinct bytes per image, so the media cache cannot serve one of
+            // them for another and every image is counted on its own.
+            image.media.bytes       = block_ppm(64, 64, static_cast<std::uint8_t>(index + 1));
+            image.media.media_type  = "image/x-portable-pixmap";
+            image.media.source_name = "budget" + std::to_string(index) + ".ppm";
+            message.parts.push_back(std::move(image));
+        }
+        ninfer::PromptInput input;
+        input.messages.push_back(std::move(message));
+        return input;
+    };
+
+    const auto prepared = frontend.prepare(images(16));
+    int failures        = check(FrontendFactory::inspect(prepared).vision_items.size() == 16,
+                                "a request at the media-item budget was not prepared");
+
+    std::string reported;
+    try {
+        (void)frontend.prepare(images(17));
+    } catch (const std::exception& error) { reported = error.what(); }
+    failures += check(!reported.empty(), "a request over the media-item budget was accepted");
+    // Over budget the request must be rejected, not truncated and not encoded
+    // past the workspace; and the rejection has to name both numbers, or a
+    // client cannot tell how much smaller to make the next attempt.
+    failures += check(reported.find("17") != std::string::npos &&
+                          reported.find("16") != std::string::npos,
+                      "the media budget rejection did not report the counts");
+    return failures;
+}
+
 int test_video_prepare(const Frontend& frontend) {
     ninfer::MessagePart video;
     video.kind              = ninfer::MessagePartKind::Media;
@@ -1043,6 +1081,7 @@ int main() {
     failures += test_text_and_image_prepare(frontend);
     failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
     failures += test_attention_pairs_are_diagnostic(frontend);
+    failures += test_media_budget_rejects_cleanly(frontend);
     failures += test_video_prepare(frontend);
     failures += test_cross_round_stop(frontend);
     failures += test_same_token_stop_priority(frontend);

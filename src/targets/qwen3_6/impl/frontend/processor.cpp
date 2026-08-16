@@ -410,18 +410,30 @@ std::uint64_t media_fingerprint(const ProcessorOptions& options, ChatPartKind ki
     return hash;
 }
 
+// A client that gets "exceeds processor budget" learns nothing it can act on: it
+// cannot tell whether to send fewer images, smaller ones, or neither, so an agent
+// loop resends the same history and wedges. Report what was asked for against
+// what is allowed, the way the context-capacity errors do.
+std::string budget_error(std::string_view what, std::uint64_t used, std::uint64_t limit) {
+    return std::string(what) + ": request needs " + std::to_string(used) + ", limit is " +
+           std::to_string(limit);
+}
+
 void enforce_media_resource_limits(const PreprocessStats& stats, const ProcessorOptions& options) {
     if (stats.media_items > options.max_media_items) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
-                             "media item count exceeds processor budget");
+                             budget_error("media item count exceeds processor budget",
+                                          stats.media_items, options.max_media_items));
     }
     if (stats.raw_patches > options.max_raw_patches) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
-                             "vision raw patches exceed processor budget");
+                             budget_error("vision raw patches exceed processor budget",
+                                          stats.raw_patches, options.max_raw_patches));
     }
     if (stats.vision_tokens > options.max_vision_tokens) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
-                             "vision tokens exceed processor budget");
+                             budget_error("vision tokens exceed processor budget",
+                                          stats.vision_tokens, options.max_vision_tokens));
     }
 }
 
@@ -615,8 +627,11 @@ ProcessedInput Processor::process(const std::vector<ChatMessage>& messages,
                                   ChatRenderOptions render_options) const {
     const std::vector<const ChatPart*> parts = media_parts(messages);
     if (parts.size() > options_.max_media_items) {
+        // This is the check a caller actually meets: it runs before any decoding,
+        // so enforce_media_resource_limits below never sees an over-count request.
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
-                             "media item count exceeds processor budget");
+                             budget_error("media item count exceeds processor budget",
+                                          parts.size(), options_.max_media_items));
     }
     RenderedChat rendered = chat_template_.render(messages, std::move(render_options));
     const media::decode::Policy policy{
