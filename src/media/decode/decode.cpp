@@ -29,6 +29,11 @@ extern "C" {
 namespace ninfer::media::decode {
 namespace {
 
+// Widest store swscale emits on the RGB output paths, and the margin that keeps its
+// overshoot on the last row inside our own allocation.
+constexpr std::size_t kRowAlign  = 32;
+constexpr std::size_t kTailSlack = 64;
+
 std::string av_error(int code) {
     std::array<char, AV_ERROR_MAX_STRING_SIZE> text{};
     av_strerror(code, text.data(), text.size());
@@ -260,15 +265,33 @@ public:
         const bool alpha = composite_alpha && descriptor != nullptr &&
                            (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
         const int channels = alpha ? 4 : 3;
-        std::vector<std::uint8_t> converted(static_cast<std::size_t>(width) * height * channels);
+        // swscale finishes an output row with a whole SIMD store, so it writes past a
+        // row whose length is not a round number of registers -- and past the buffer
+        // itself on the last row. FFmpeg's own examples hand it planes from
+        // av_image_alloc, which pads every line; a vector sized exactly
+        // width*height*channels is precisely the case it overruns, and the bytes it
+        // drops land in the next heap chunk's header. Widths whose row is already a
+        // multiple of the register survive, which is why this only ever showed up on
+        // some images. Pad the row, keep a tail margin, then compact back to the tight
+        // layout Image promises its readers.
+        const std::size_t row  = static_cast<std::size_t>(width) * channels;
+        const std::size_t line = (row + kRowAlign - 1) / kRowAlign * kRowAlign;
+        std::vector<std::uint8_t> converted(line * height + kTailSlack);
         sws_ = sws_getCachedContext(sws_, width, height, static_cast<AVPixelFormat>(frame->format),
                                     width, height, alpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24,
                                     SWS_POINT, nullptr, nullptr, nullptr);
         if (sws_ == nullptr) { throw std::runtime_error("failed to create media color converter"); }
         std::uint8_t* dst[] = {converted.data(), nullptr, nullptr, nullptr};
-        int stride[]        = {width * channels, 0, 0, 0};
+        int stride[]        = {static_cast<int>(line), 0, 0, 0};
         const int rows      = sws_scale(sws_, frame->data, frame->linesize, 0, height, dst, stride);
         if (rows != height) { throw std::runtime_error("failed to convert media frame to RGB"); }
+        if (line != row) {
+            for (int y = 1; y < height; ++y) {
+                std::memmove(converted.data() + static_cast<std::size_t>(y) * row,
+                             converted.data() + static_cast<std::size_t>(y) * line, row);
+            }
+        }
+        converted.resize(row * static_cast<std::size_t>(height));
         out.rgb.resize(static_cast<std::size_t>(width) * height * 3);
         if (!alpha) {
             out.rgb = std::move(converted);
