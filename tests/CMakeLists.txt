@@ -78,6 +78,9 @@ target_include_directories(ninfer_sampling_defaults_test PRIVATE
 ninfer_add_test(ninfer_kv_cache_test
   SOURCES test_kv_cache.cpp
   LIBRARIES ninfer_core)
+ninfer_add_op_test(ninfer_gqa_kv_quant_i4_test
+  SOURCES ops/test_gqa_kv_quant_i4.cu
+  LIBRARIES ninfer_core)
 ninfer_add_test(ninfer_kv_layout_int4_test
   SOURCES test_kv_layout_int4.cpp
   LIBRARIES ninfer_engine ninfer_core)
