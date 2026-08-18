@@ -3,6 +3,7 @@
 #include "core/linear_attention_state.h"
 #include "core/layout.h"
 #include "core/paged_kv_cache.h"
+#include "ninfer/types.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +11,44 @@
 
 namespace ninfer::targets::qwen3_6 {
 
-inline constexpr std::int32_t kKvQuantGroup = 64;
+inline constexpr std::int32_t kKvQuantGroup     = 64;
+inline constexpr std::int32_t kKvQuantGroupInt4 = 32;
+
+// INT4 codes live in a U8 plane of half the head extent: two nibbles per byte, low nibble first.
+[[nodiscard]] constexpr DType kv_storage_dtype(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return DType::BF16;
+    case KvCacheStorage::Int8Group64:
+        return DType::I8;
+    case KvCacheStorage::Int4Group32:
+        return DType::U8;
+    }
+    return DType::BF16;
+}
+
+[[nodiscard]] constexpr std::int32_t kv_storage_quant_group(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return 0;
+    case KvCacheStorage::Int8Group64:
+        return kKvQuantGroup;
+    case KvCacheStorage::Int4Group32:
+        return kKvQuantGroupInt4;
+    }
+    return 0;
+}
+
+[[nodiscard]] constexpr KvCacheStorage kv_storage_of(DType dtype) noexcept {
+    switch (dtype) {
+    case DType::I8:
+        return KvCacheStorage::Int8Group64;
+    case DType::U8:
+        return KvCacheStorage::Int4Group32;
+    default:
+        return KvCacheStorage::BFloat16;
+    }
+}
 
 struct DecoderStateSpec {
     std::uint32_t full_attention_layers     = 0;

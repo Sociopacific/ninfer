@@ -52,6 +52,10 @@ void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char
 }
 
 std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_heads, const char* op) {
+    if (cache.dtype == DType::U8) {
+        throw std::invalid_argument(std::string(op) +
+                                    ": INT4 KV cache has no attention kernel yet");
+    }
     if ((cache.dtype != DType::BF16 && cache.dtype != DType::I8) ||
         cache.num_kv_heads != kv_heads || cache.head_dim != kHeadDim) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache geometry or dtype");
@@ -109,6 +113,10 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
 
 std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
                                    const char* op) {
+    if (cache.dtype == DType::U8) {
+        throw std::invalid_argument(std::string(op) +
+                                    ": INT4 KV cache has no attention kernel yet");
+    }
     if ((cache.dtype != DType::BF16 && cache.dtype != DType::I8) ||
         cache.num_kv_heads != kv_heads || cache.head_dim != kHeadDim) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache geometry or dtype");
@@ -355,6 +363,8 @@ std::size_t gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType c
                                                    std::int32_t batch_size, std::int32_t min_width,
                                                    std::int32_t max_width) {
     (void)kv_heads_for_q_heads(q_heads, "gqa_attention workspace");
+    // INT4 reuses the INT8 kernel structure, so it plans against the same split policy.
+    if (cache_dtype == DType::U8) { cache_dtype = DType::I8; }
     if ((cache_dtype != DType::BF16 && cache_dtype != DType::I8) || batch_size <= 0 ||
         batch_size > kMaximumBatchSize || min_width <= 0 || max_width < min_width ||
         (batch_size > 1 && max_width > kMaximumVerifyTokens) || envelope.min_visible_keys == 0 ||
