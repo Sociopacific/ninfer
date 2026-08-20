@@ -185,6 +185,7 @@ set(ninfer_op_tests
   gated_delta_net
   causal_conv1d_silu
   dflash_conv
+  dflash_select
   layer_norm
   embedding
   argmax

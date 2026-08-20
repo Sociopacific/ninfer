@@ -12,6 +12,7 @@
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/speculative_round.h"
+#include "ninfer/ops/dflash_select.h"
 #include "ninfer/ops/gqa_attention.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
 #include "ninfer/ops/swa.h"
@@ -26,6 +27,16 @@
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 namespace {
+
+// DFlash v1 configs carry no selector fields; a dependent context keeps the access legal.
+template <class Config>
+constexpr std::int32_t dflash_selector_rank_or_zero() {
+    if constexpr (requires { Config::selector_rank; }) {
+        return Config::selector_rank;
+    } else {
+        return 0;
+    }
+}
 
 constexpr std::size_t kMiB        = 1024ULL * 1024ULL;
 constexpr std::size_t kArenaAlign = 256ULL;
@@ -516,6 +527,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     matrix(layout, DType::BF16, Variant::draft_head_rows, drafts * batch);
                 } else {
                     matrix(layout, DType::BF16, TextConfig::output_rows, drafts * batch);
+                    constexpr std::int32_t selector_rank =
+                        dflash_selector_rank_or_zero<DFlashConfig>();
+                    if constexpr (selector_rank > 0) {
+                        scratch(layout, ops::dflash_select_workspace_capacity_bytes(
+                                            selector_rank, drafts * batch));
+                    }
                 }
                 return finish(layout);
             };

@@ -6,6 +6,7 @@
 #include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
 #include "ninfer/ops/dflash_conv.h"
+#include "ninfer/ops/dflash_select.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/kv_cache_append_prefix.h"
 #include "ninfer/ops/linear.h"
@@ -24,6 +25,8 @@
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
@@ -361,8 +364,29 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_6::DFlashDecodeState& f
                 DType::BF16, {TextConfig::output_rows, static_cast<std::int32_t>(k) * batch_size});
             ops::linear(proposal_hidden, state.execution.model.output_head, logits,
                         state.execution.device.stream);
-            ops::argmax(logits, flat_drafts, TextConfig::token_domain,
-                        state.execution.device.stream);
+            bool argmax_drafts = true;
+            if constexpr (Config::has_candidate_select) {
+                // The codebook selector chains each draft on its predecessor; NINFER_DFLASH_ARGMAX
+                // forces the plain argmax head for A/B runs.
+                static const bool force_argmax = std::getenv("NINFER_DFLASH_ARGMAX") != nullptr;
+                if (std::getenv("NINFER_DFLASH_TRACE") != nullptr) {
+                    std::fprintf(stderr, "[propose] head=%s\n",
+                                 force_argmax ? "argmax" : "selector");
+                }
+                if (!force_argmax) {
+                    argmax_drafts        = false;
+                    const auto& selector = state.execution.model.dflash->selector;
+                    ops::dflash_select(logits, proposal_hidden, selector.hidden_projection,
+                                       anchors, selector.predecessor_codebook,
+                                       selector.successor_codebook, TextConfig::token_domain,
+                                       static_cast<std::int32_t>(k), flat_drafts,
+                                       state.execution.work, state.execution.device.stream);
+                }
+            }
+            if (argmax_drafts) {
+                ops::argmax(logits, flat_drafts, TextConfig::token_domain,
+                            state.execution.device.stream);
+            }
         } else {
             if (!state.execution.model.optimized_proposal.has_value()) {
                 throw std::logic_error("optimized DFlash proposal head is unavailable");
