@@ -40,16 +40,6 @@ constexpr std::string_view kThinkClose = "</think>";
 constexpr double kRescaleFactor        = 1.0 / 255.0;
 constexpr double kVideoFps             = 2.0;
 constexpr int kVideoMinFrames          = 4;
-
-// preprocessor_config.json ships the model's *capability* ceiling -- longest_edge
-// there is large enough that a retina screenshot is never resized, so one image
-// costs 7625 tokens where the same screen at 1600x1200 costs 1965. A serving
-// endpoint wants a *policy* ceiling instead, which is what every hosted API
-// applies: fit-and-scale rather than reject. This is Qwen's own documented
-// default budget of 1280 visual tokens, and one visual token is 32x32 pixels.
-// Raising it makes single images sharper and fewer of them fit the context;
-// lowering it does the reverse. Nothing else in the pipeline reads it.
-constexpr std::uint64_t kImagePixelPolicyCeiling = 1280ULL * 32ULL * 32ULL;
 constexpr int kVideoMaxFrames          = 768;
 
 constexpr std::array<std::pair<std::string_view, TokenId>, 4> kVisionSpecialTokens = {{
@@ -166,10 +156,9 @@ fi::ProcessorOptions processor_options(const FrontendResources& resources) {
     options.image_min_pixels =
         positive_u64(require_integer(image_size, "shortest_edge", "preprocessor_config.json.size"),
                      "image shortest_edge");
-    options.image_max_pixels = std::min(
+    options.image_max_pixels =
         positive_u64(require_integer(image_size, "longest_edge", "preprocessor_config.json.size"),
-                     "image longest_edge"),
-        kImagePixelPolicyCeiling);
+                     "image longest_edge");
     options.video_min_pixels = positive_u64(
         require_integer(video_size, "shortest_edge", "video_preprocessor_config.json.size"),
         "video shortest_edge");

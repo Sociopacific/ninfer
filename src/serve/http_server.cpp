@@ -398,8 +398,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 return req.is_connection_alive && !req.is_connection_alive();
             });
             log_request_done(log_context, outcome);
-            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens,
-                                        static_cast<int>(outcome.metrics.prefix_cache_hit_tokens)};
+            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
             std::string response_body;
             if (!outcome.tool_calls.empty()) {
                 response_body = make_chat_completion_tool_response(
@@ -484,9 +483,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                               include_usage));
                 }
                 if (include_usage) {
-                    const CompletionUsage usage{
-                        outcome.prompt_tokens, outcome.completion_tokens,
-                        static_cast<int>(outcome.metrics.prefix_cache_hit_tokens)};
+                    const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
                     write_stream_item(sink, *stream,
                                       make_chat_chunk_usage(id, model, created, usage));
                 }
@@ -614,8 +611,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
                 return req.is_connection_alive && !req.is_connection_alive();
             });
             log_request_done(log_context, outcome);
-            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens,
-                                        static_cast<int>(outcome.metrics.prefix_cache_hit_tokens)};
+            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
             const char* stop_reason =
                 messages_stop_reason(outcome.finish_reason, !outcome.tool_calls.empty());
             set_owned_content(res,

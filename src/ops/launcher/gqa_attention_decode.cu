@@ -4,6 +4,7 @@
 #include "ops/common/math.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
 #include "ops/kernel/gqa_attention_decode_bf16.cuh"
+#include "ops/kernel/gqa_attention_decode_i4.cuh"
 #include "ops/kernel/gqa_attention_decode_i8.cuh"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/gqa_attention.h"
@@ -45,6 +46,7 @@ std::int32_t gqa_small_t_split_count(std::int32_t window, std::int32_t tokens, D
     // A 64-key default split just above a 32-key boundary makes the partial
     // kernel execute a nearly empty second tile. These short ranges instead
     // launch one 32-key tile per split; the larger CTAs keep the small grid busy.
+    if (kv_dtype == DType::U8) { kv_dtype = DType::I8; }
     if (kv_dtype == DType::I8 && tokens == 5 && window > 128 && window <= 512) {
         return div_up(window, 32 / Geometry::DecodeSplitScale);
     }
@@ -111,12 +113,16 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename Geometry, int TokenTile, bool MultiBatch, bool Masked, typename CacheInput>
-void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
-                          PagedKVBatchLayerView cache, const GqaSmallTInvocation& invocation,
-                          std::int32_t logical_capacity, std::int32_t implementation_window,
-                          std::int32_t splits, Tensor& partial_acc, Tensor& partial_m,
-                          Tensor& partial_l, cudaStream_t stream) {
+// Packed selects the INT4 kernel. Both storages share this launch policy: the
+// shared arena is the same size and the split geometry is identical.
+template <typename Geometry, int TokenTile, bool Packed, bool MultiBatch, bool Masked,
+          typename CacheInput>
+void launch_tc_partial_quant(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
+                             PagedKVBatchLayerView cache, const GqaSmallTInvocation& invocation,
+                             std::int32_t logical_capacity, std::int32_t implementation_window,
+                             std::int32_t splits, Tensor& partial_acc, Tensor& partial_m,
+                             Tensor& partial_l, cudaStream_t stream) {
+    using CodeT           = std::conditional_t<Packed, std::uint8_t, std::int8_t>;
     Tensor& cache_k       = cache.k_pages;
     Tensor& cache_v       = cache.v_pages;
     Tensor& cache_k_scale = cache.k_scale_pages;
@@ -125,20 +131,27 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
         constexpr std::size_t kDynamicBytes =
             DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kGqaHeadDim) : 0u;
+        const auto kernel = [] {
+            if constexpr (Packed) {
+                return gqa_attention_decode_i4_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
+                                                            MinBlocksPerSm, KeyBlock, DynamicArena,
+                                                            MultiBatch, Masked, CacheInput>;
+            } else {
+                return gqa_attention_decode_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
+                                                            MinBlocksPerSm, KeyBlock, DynamicArena,
+                                                            MultiBatch, Masked, CacheInput>;
+            }
+        }();
         if constexpr (DynamicArena) {
-            static const cudaError_t attr = cudaFuncSetAttribute(
-                gqa_attention_decode_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
-                                                     MinBlocksPerSm, KeyBlock, DynamicArena,
-                                                     MultiBatch, Masked, CacheInput>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
+            static const cudaError_t attr =
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     static_cast<int>(kDynamicBytes));
             CUDA_CHECK(attr);
         }
-        gqa_attention_decode_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm,
-                                             KeyBlock, DynamicArena, MultiBatch, Masked, CacheInput>
-            <<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
+        kernel<<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
                 static_cast<const __nv_bfloat16*>(q.data), input,
-                static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
-                static_cast<std::int8_t*>(cache_v.data), static_cast<__half*>(cache_k_scale.data),
+                static_cast<const std::int32_t*>(pos.data), static_cast<CodeT*>(cache_k.data),
+                static_cast<CodeT*>(cache_v.data), static_cast<__half*>(cache_k_scale.data),
                 static_cast<__half*>(cache_v_scale.data),
                 static_cast<const std::int32_t*>(cache.block_tables.data),
                 invocation.valid_columns == nullptr
@@ -219,6 +232,8 @@ bool gqa_attention_uses_small_t(std::int32_t tokens) { return tokens >= 1 && tok
 
 std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
                                           DType cache_dtype, GqaExecutionEnvelope envelope) {
+    // INT4 reuses the INT8 kernel structure, so it plans against the same split policy.
+    if (cache_dtype == DType::U8) { cache_dtype = DType::I8; }
     if (tokens < 1 || tokens > 6 || (cache_dtype != DType::BF16 && cache_dtype != DType::I8) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("gqa_attention split capacity: invalid profile");
@@ -244,13 +259,17 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
     const auto splits =
         gqa_small_t_launch_capacity<Geometry>(envelope, invocation.width, cache.dtype);
 
-    // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
-    // geometry inside launch_tc_partial_i8.
+    // BF16 keeps its row-tile warp count; the quantized storages select their
+    // producer/consumer geometry inside launch_tc_partial_quant.
 #define NINFER_GQA_SMALL_T_DISPATCH(TOKENS, WARPS)                                                 \
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (cache.dtype == DType::I8) {                                                        \
-                launch_tc_partial_i8<Geometry, (TOKENS), MultiBatch, Masked>(                      \
+                launch_tc_partial_quant<Geometry, (TOKENS), false, MultiBatch, Masked>(            \
+                    q, input, pos, scale, cache, invocation, logical_capacity,                     \
+                    implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
+            } else if (cache.dtype == DType::U8) {                                                 \
+                launch_tc_partial_quant<Geometry, (TOKENS), true, MultiBatch, Masked>(             \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else {                                                                               \
@@ -336,7 +355,7 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
             launch_profile.template operator()<Int8, true, false>();
         }
     };
-    if (cache.dtype == DType::I8) {
+    if (cache.dtype == DType::I8 || cache.dtype == DType::U8) {
         launch_for_dtype.template operator()<true>();
     } else {
         launch_for_dtype.template operator()<false>();
