@@ -387,6 +387,166 @@ if not isinstance(_embedding_expression, family_recipe.SourceTensor):
 OFFICIAL_EMBEDDING_SOURCE = _embedding_expression
 
 
+DFLASH_REPOSITORY = "dflash2-qwen38-27b"
+
+
+def _build_dflash_recipes() -> tuple[family_recipe.TensorRecipe, ...]:
+    """Map the DFlash2 drafter checkpoint onto the artifact's dflash objects."""
+
+    make = family_recipe.TensorRecipe
+    src = family_recipe.source
+    hidden = inventory.DFLASH_HIDDEN
+    kv = inventory.DFLASH_KV_ROWS
+    query = inventory.DFLASH_QUERY_ROWS
+    inter = inventory.DFLASH_INTERMEDIATE
+    conv_rows = inventory.DFLASH_CONV_PROJECTION_ROWS
+    conv_kernel = inventory.DFLASH_CONV_KERNEL_SIZE
+    rank = inventory.DFLASH_SELECTOR_RANK
+    vocab = inventory.DFLASH_VOCAB
+
+    recipes: list[family_recipe.TensorRecipe] = [
+        make(
+            "dflash/feature_projection",
+            src("fc.weight", (hidden, inventory.DFLASH_FEATURE_ROWS)),
+        ),
+        make("dflash/context_norm", src("hidden_norm.weight", (hidden,))),
+    ]
+    for layer in inventory.DFLASH_LAYERS:
+        source_prefix = f"layers.{layer}."
+        object_prefix = f"dflash/layers/{layer}/"
+        recipes.extend(
+            (
+                make(
+                    object_prefix + "input_norm",
+                    src(source_prefix + "input_layernorm.weight", (hidden,)),
+                ),
+                make(
+                    object_prefix + "attention/query_key_value",
+                    family_recipe.Concat(
+                        (
+                            src(
+                                source_prefix + "self_attn.q_proj.weight",
+                                (query, hidden),
+                            ),
+                            src(
+                                source_prefix + "self_attn.k_proj.weight",
+                                (kv, hidden),
+                            ),
+                            src(
+                                source_prefix + "self_attn.v_proj.weight",
+                                (kv, hidden),
+                            ),
+                        ),
+                        0,
+                    ),
+                ),
+                make(
+                    object_prefix + "attention/query_norm",
+                    src(source_prefix + "self_attn.q_norm.weight", (128,)),
+                ),
+                make(
+                    object_prefix + "attention/key_norm",
+                    src(source_prefix + "self_attn.k_norm.weight", (128,)),
+                ),
+                make(
+                    object_prefix + "attention/output",
+                    src(source_prefix + "self_attn.o_proj.weight", (hidden, query)),
+                ),
+                make(
+                    object_prefix + "post_attention_norm",
+                    src(source_prefix + "post_attention_layernorm.weight", (hidden,)),
+                ),
+                make(
+                    object_prefix + "mlp/gate_up",
+                    family_recipe.Concat(
+                        (
+                            src(
+                                source_prefix + "mlp.gate_proj.weight",
+                                (inter, hidden),
+                            ),
+                            src(
+                                source_prefix + "mlp.up_proj.weight",
+                                (inter, hidden),
+                            ),
+                        ),
+                        0,
+                    ),
+                ),
+                make(
+                    object_prefix + "mlp/down",
+                    src(source_prefix + "mlp.down_proj.weight", (hidden, inter)),
+                ),
+                make(
+                    object_prefix + "attention_conv/base_kernel",
+                    src(
+                        source_prefix + "attention_conv.base_kernel",
+                        (2, conv_kernel, hidden),
+                    ),
+                ),
+                make(
+                    object_prefix + "attention_conv/kernel_projection",
+                    src(
+                        source_prefix + "attention_conv.kernel_projection.weight",
+                        (conv_rows, hidden),
+                    ),
+                ),
+                make(
+                    object_prefix + "mlp_conv/base_kernel",
+                    src(
+                        source_prefix + "mlp_conv.base_kernel",
+                        (2, conv_kernel, hidden),
+                    ),
+                ),
+                make(
+                    object_prefix + "mlp_conv/kernel_projection",
+                    src(
+                        source_prefix + "mlp_conv.kernel_projection.weight",
+                        (conv_rows, hidden),
+                    ),
+                ),
+            )
+        )
+    recipes.extend(
+        (
+            make("dflash/final_norm", src("norm.weight", (hidden,))),
+            make(
+                "dflash/selector/hidden_projection",
+                src("candidate_selector.hidden_projection.weight", (rank, hidden)),
+            ),
+            make(
+                "dflash/selector/predecessor_codebook",
+                src("candidate_selector.predecessor_codebook", (vocab, rank)),
+            ),
+            make(
+                "dflash/selector/successor_codebook",
+                src("candidate_selector.successor_codebook", (vocab, rank)),
+            ),
+        )
+    )
+    return tuple(recipes)
+
+
+DFLASH_RECIPE_SPECS = _build_dflash_recipes()
+DFLASH_RECIPES_BY_NAME = {
+    item.object_name: item for item in DFLASH_RECIPE_SPECS
+}
+
+
+def preflight_dflash_sources(
+    reader: ShardReader,
+) -> family_recipe.SourcePreflight:
+    return family_recipe.preflight_source_reader(reader, DFLASH_RECIPE_SPECS)
+
+
+def materialize_dflash(
+    object_name: str,
+    reader: ShardReader,
+) -> torch.Tensor:
+    return family_recipe.materialize_recipe(
+        DFLASH_RECIPES_BY_NAME[object_name], reader
+    )
+
+
 def _validate_matrix_recipe(
     object_name: str,
     shape: tuple[int, int],
@@ -406,6 +566,9 @@ def validate_recipe() -> None:
     family_recipe.validate_recipe_coverage(
         OFFICIAL_RECIPES, OFFICIAL_TENSOR_SPECS
     )
+    family_recipe.validate_recipe_coverage(
+        DFLASH_RECIPE_SPECS, inventory.DFLASH_TENSOR_SPECS
+    )
     if (
         len(FP8_WEIGHT_RECIPES),
         len(NVFP4_WEIGHT_RECIPES),
@@ -415,7 +578,8 @@ def validate_recipe() -> None:
         len(NVFP4_SOURCES),
         len(QUANTIZED_DIRECT_RECIPES),
         len(OFFICIAL_RECIPES),
-    ) != (145, 112, 112, 56, 233, 168, 401, 348):
+        len(DFLASH_RECIPE_SPECS),
+    ) != (145, 112, 112, 56, 233, 168, 401, 348, 66):
         raise ValueError("Qwen3.8 NVFP4 source recipe is incomplete")
     ownership = (
         {"text/token_embedding"},
@@ -424,6 +588,7 @@ def validate_recipe() -> None:
         set(INPUT_DIVISORS_BY_NAME),
         set(QUANTIZED_DIRECT_BY_NAME),
         set(OFFICIAL_RECIPES_BY_NAME).difference({"text/token_embedding"}),
+        set(DFLASH_RECIPES_BY_NAME),
     )
     all_names: set[str] = set()
     for names in ownership:
@@ -742,6 +907,9 @@ validate_recipe()
 __all__ = [
     "BASE_REPOSITORY",
     "BASE_REVISION",
+    "DFLASH_RECIPES_BY_NAME",
+    "DFLASH_RECIPE_SPECS",
+    "DFLASH_REPOSITORY",
     "EXPECTED_QUANTIZED_FIELDS",
     "FP8_SOURCES",
     "FP8_WEIGHT_RECIPES",

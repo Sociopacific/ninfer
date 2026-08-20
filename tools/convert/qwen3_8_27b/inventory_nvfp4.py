@@ -157,6 +157,21 @@ def _build_draft_head_specs() -> tuple[TensorSpec, ...]:
     )
 
 
+DFLASH_LAYERS = tuple(range(5))
+DFLASH_HIDDEN = 5120
+DFLASH_FEATURE_LAYERS = 5
+DFLASH_FEATURE_ROWS = DFLASH_FEATURE_LAYERS * DFLASH_HIDDEN
+DFLASH_INTERMEDIATE = 17408
+DFLASH_QUERY_ROWS = 4096
+DFLASH_KV_ROWS = 1024
+DFLASH_CONV_KERNEL_SIZE = 2
+DFLASH_CONV_GROUP_SIZE = 16
+DFLASH_CONV_GROUPS = DFLASH_HIDDEN // DFLASH_CONV_GROUP_SIZE
+DFLASH_CONV_PROJECTION_ROWS = 2 * DFLASH_CONV_KERNEL_SIZE * DFLASH_CONV_GROUPS
+DFLASH_SELECTOR_RANK = 256
+DFLASH_VOCAB = 248320
+
+
 def _build_mtp_specs() -> tuple[TensorSpec, ...]:
     return (
         tensor_spec("mtp/input_projection", (5120, 10240), W8),
@@ -176,16 +191,102 @@ def _build_mtp_specs() -> tuple[TensorSpec, ...]:
     )
 
 
+def _build_dflash_specs() -> tuple[TensorSpec, ...]:
+    """DFlash2 drafter: five sliding-window layers plus the candidate selector."""
+
+    specs: list[TensorSpec] = [
+        tensor_spec(
+            "dflash/feature_projection",
+            (DFLASH_HIDDEN, DFLASH_FEATURE_ROWS),
+            Q4,
+        ),
+        tensor_spec("dflash/context_norm", (DFLASH_HIDDEN,), BF16),
+    ]
+    for layer in DFLASH_LAYERS:
+        prefix = f"dflash/layers/{layer}/"
+        specs.extend(
+            (
+                tensor_spec(prefix + "input_norm", (DFLASH_HIDDEN,), BF16),
+                tensor_spec(
+                    prefix + "attention/query_key_value",
+                    (DFLASH_QUERY_ROWS + 2 * DFLASH_KV_ROWS, DFLASH_HIDDEN),
+                    Q4,
+                ),
+                tensor_spec(prefix + "attention/query_norm", (128,), BF16),
+                tensor_spec(prefix + "attention/key_norm", (128,), BF16),
+                tensor_spec(
+                    prefix + "attention/output",
+                    (DFLASH_HIDDEN, DFLASH_QUERY_ROWS),
+                    Q4,
+                ),
+                tensor_spec(prefix + "post_attention_norm", (DFLASH_HIDDEN,), BF16),
+                tensor_spec(
+                    prefix + "mlp/gate_up",
+                    (2 * DFLASH_INTERMEDIATE, DFLASH_HIDDEN),
+                    Q4,
+                ),
+                tensor_spec(
+                    prefix + "mlp/down",
+                    (DFLASH_HIDDEN, DFLASH_INTERMEDIATE),
+                    Q4,
+                ),
+                tensor_spec(
+                    prefix + "attention_conv/base_kernel",
+                    (2, DFLASH_CONV_KERNEL_SIZE, DFLASH_HIDDEN),
+                    BF16,
+                ),
+                tensor_spec(
+                    prefix + "attention_conv/kernel_projection",
+                    (DFLASH_CONV_PROJECTION_ROWS, DFLASH_HIDDEN),
+                    Q4,
+                ),
+                tensor_spec(
+                    prefix + "mlp_conv/base_kernel",
+                    (2, DFLASH_CONV_KERNEL_SIZE, DFLASH_HIDDEN),
+                    BF16,
+                ),
+                tensor_spec(
+                    prefix + "mlp_conv/kernel_projection",
+                    (DFLASH_CONV_PROJECTION_ROWS, DFLASH_HIDDEN),
+                    Q4,
+                ),
+            )
+        )
+    specs.extend(
+        (
+            tensor_spec("dflash/final_norm", (DFLASH_HIDDEN,), BF16),
+            tensor_spec(
+                "dflash/selector/hidden_projection",
+                (DFLASH_SELECTOR_RANK, DFLASH_HIDDEN),
+                BF16,
+            ),
+            tensor_spec(
+                "dflash/selector/predecessor_codebook",
+                (DFLASH_VOCAB, DFLASH_SELECTOR_RANK),
+                BF16,
+            ),
+            tensor_spec(
+                "dflash/selector/successor_codebook",
+                (DFLASH_VOCAB, DFLASH_SELECTOR_RANK),
+                BF16,
+            ),
+        )
+    )
+    return tuple(specs)
+
+
 TEXT_CORE_TENSOR_SPECS = _build_text_core_specs()
 DRAFT_HEAD_TENSOR_SPECS = _build_draft_head_specs()
 MTP_TENSOR_SPECS = _build_mtp_specs()
 VISION_TENSOR_SPECS = build_vision_specs(5120)
+DFLASH_TENSOR_SPECS = _build_dflash_specs()
 
 TENSOR_SPECS = (
     TEXT_CORE_TENSOR_SPECS
     + DRAFT_HEAD_TENSOR_SPECS
     + MTP_TENSOR_SPECS
     + VISION_TENSOR_SPECS
+    + DFLASH_TENSOR_SPECS
 )
 OBJECT_SPECS: tuple[StoredObjectSpec, ...] = RESOURCE_SPECS + TENSOR_SPECS
 
@@ -382,18 +483,19 @@ def validate_inventory() -> None:
         len(DRAFT_HEAD_TENSOR_SPECS),
         len(MTP_TENSOR_SPECS),
         len(VISION_TENSOR_SPECS),
+        len(DFLASH_TENSOR_SPECS),
         len(TENSOR_SPECS),
         len(OBJECT_SPECS),
         len(NVFP4_TENSOR_SPECS),
         len(FP8_TENSOR_SPECS),
         len(INPUT_SCALE_DIVISOR_SPECS),
-    ) != (771, 2, 12, 333, 1118, 1124, 112, 146, 112):
+    ) != (771, 2, 12, 333, 66, 1184, 1190, 112, 146, 112):
         raise ValueError("registered Qwen3.8 NVFP4 inventory is incomplete")
     if FORMAT_COUNTS != {
-        BF16: 534,
+        BF16: 569,
         FP32: 208,
         I32: 1,
-        Q4: 55,
+        Q4: 86,
         Q5: 54,
         Q6: 1,
         W8: 7,
@@ -402,8 +504,8 @@ def validate_inventory() -> None:
     }:
         raise ValueError(f"unexpected numeric allocation: {FORMAT_COUNTS}")
     if LAYOUT_COUNTS != {
-        CONTIGUOUS_LAYOUT: 743,
-        ROW_SPLIT_LAYOUT: 117,
+        CONTIGUOUS_LAYOUT: 778,
+        ROW_SPLIT_LAYOUT: 148,
         BLOCK_SCALE_LAYOUT: 112,
         ROW_SCALE_LAYOUT: 146,
     }:
@@ -433,6 +535,8 @@ __all__ = [
     "LAYOUT_NAMES",
     "LOGICAL_ROW_VIEW_SPECS",
     "MODEL_ID",
+    "DFLASH_LAYERS",
+    "DFLASH_TENSOR_SPECS",
     "MTP_TENSOR_SPECS",
     "NVFP4",
     "NVFP4_MLP_LAYERS",

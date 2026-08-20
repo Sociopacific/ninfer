@@ -58,12 +58,28 @@ _NVFP4_TARGETS = [r"re:.*mlp\.(gate|up|down)_proj$"]
 class ConversionPreflight:
     official_dir: Path
     quantized_dir: Path
+    dflash_dir: Path
     config_summary: dict[str, object]
     official_source: family_recipe.SourcePreflight
     quantized_source: family_recipe.SourcePreflight
+    dflash_source: family_recipe.SourcePreflight
     resources: tuple[family_conversion.ResourcePayload, ...]
     draft: draft_head.DraftHeadContext
     object_plan: family_conversion.ObjectPlan
+
+
+def open_source(model_dir: str | Path) -> ShardReader:
+    """Accept both sharded and single-file safetensors sources."""
+
+    directory = Path(model_dir)
+    if (directory / "model.safetensors.index.json").is_file():
+        return ShardReader(directory)
+    single = directory / "model.safetensors"
+    if single.is_file():
+        return ShardReader.from_file(single)
+    raise FileNotFoundError(
+        f"{directory}: no safetensors index or model.safetensors"
+    )
 
 
 def _repo_root() -> Path:
@@ -205,9 +221,11 @@ def build_object_plan(
 def preflight_conversion(
     official_dir: str | Path,
     quantized_dir: str | Path,
+    dflash_dir: str | Path,
 ) -> ConversionPreflight:
     official = Path(official_dir)
     quantized = Path(quantized_dir)
+    dflash = Path(dflash_dir)
     _validate_index(official)
     _validate_index(quantized)
 
@@ -226,6 +244,8 @@ def preflight_conversion(
         official_source = recipe.preflight_official_sources(official_reader)
     with ShardReader(quantized) as quantized_reader:
         quantized_source = recipe.preflight_quantized_metadata(quantized_reader)
+    with open_source(dflash) as dflash_reader:
+        dflash_source = recipe.preflight_dflash_sources(dflash_reader)
 
     resources = base_convert.load_resources(official)
     resource_map = {resource.name: resource.data for resource in resources}
@@ -235,9 +255,11 @@ def preflight_conversion(
     return ConversionPreflight(
         official_dir=official,
         quantized_dir=quantized,
+        dflash_dir=dflash,
         config_summary=official_summary,
         official_source=official_source,
         quantized_source=quantized_source,
+        dflash_source=dflash_source,
         resources=resources,
         draft=draft,
         object_plan=object_plan,
@@ -350,6 +372,7 @@ def _build_report(
 def convert(
     official_dir: str | Path,
     quantized_dir: str | Path,
+    dflash_dir: str | Path,
     out_path: str | Path,
     *,
     device: str | torch.device = "cuda",
@@ -364,7 +387,7 @@ def convert(
         )
     requested_device = str(device)
     resolved_device = pick_device(device)
-    preflight = preflight_conversion(official_dir, quantized_dir)
+    preflight = preflight_conversion(official_dir, quantized_dir, dflash_dir)
 
     print(
         f"preflight complete: {len(preflight.object_plan.objects)} objects, "
@@ -379,7 +402,7 @@ def convert(
     derived = {draft_head.DRAFT_HEAD_TOKEN_IDS_OBJECT: draft_ids}
     with ShardReader(preflight.official_dir) as official_reader, ShardReader(
         preflight.quantized_dir
-    ) as quantized_reader:
+    ) as quantized_reader, open_source(preflight.dflash_dir) as dflash_reader:
         with ArtifactWriter(
             output,
             ArtifactIdentity(inventory.MODEL_ID, inventory.WEIGHTS_ID),
@@ -409,6 +432,17 @@ def convert(
                         quantized_reader,
                     )
                     payload = encode_direct(scalar, inventory.FP32)
+                elif spec.name in recipe.DFLASH_RECIPES_BY_NAME:
+                    tensor = recipe.materialize_dflash(spec.name, dflash_reader)
+                    if tuple(tensor.shape) != spec.shape:
+                        raise ValueError(
+                            f"{spec.name}: materialized shape "
+                            f"{tuple(tensor.shape)} != {spec.shape}"
+                        )
+                    payload = family_conversion.encode_tensor_payload(
+                        tensor, spec, resolved_device
+                    )
+                    del tensor
                 elif spec.name in recipe.QUANTIZED_DIRECT_BY_NAME:
                     tensor = _materialize_direct(spec, quantized_reader)
                     payload = encode_direct(tensor, spec.format)
@@ -433,6 +467,7 @@ def convert(
     arguments = {
         "model": str(official_dir),
         "quantized_model": str(quantized_dir),
+        "dflash_model": str(dflash_dir),
         "out": str(out_path),
         "device": requested_device,
     }
@@ -460,12 +495,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--quantized-model", required=True, type=Path)
+    parser.add_argument("--dflash-model", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--device", default="cuda")
     arguments = parser.parse_args(argv)
     convert(
         arguments.model,
         arguments.quantized_model,
+        arguments.dflash_model,
         arguments.out,
         device=arguments.device,
     )
