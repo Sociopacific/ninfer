@@ -43,8 +43,9 @@ GPU residency is frozen when the Engine starts:
 - `--vision` loads those allocations and enables image/video input.
 
 The complete `.ninfer` inventory is still validated. These choices are not lazy loading: a
-text-only Engine rejects media and cannot enable Vision later. DFlash and Vision are mutually
-exclusive. The default speculative and Vision settings produce the smallest resident profile.
+text-only Engine rejects media and cannot enable Vision later. DFlash and Vision may be enabled
+together; `ninfer-serve` still rejects that pair because its DFlash path is not wired yet. The
+default speculative and Vision settings produce the smallest resident profile.
 
 ## Structured messages
 
