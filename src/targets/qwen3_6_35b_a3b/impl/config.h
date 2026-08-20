@@ -88,6 +88,11 @@ struct DFlashConfig {
     static constexpr float attention_scale = 0.08838834764831845F;
     static constexpr std::array<int, feature_layers> target_feature_layers{1,  6,  11, 16,
                                                                            22, 27, 32, 37};
+
+    // DFlash v1 has neither of the DFlash2 additions.
+    static constexpr bool has_convolution      = false;
+    static constexpr bool has_candidate_select = false;
+    static constexpr int block_size            = 16;
 };
 
 inline constexpr float kAttentionScale                   = 0.0625F;

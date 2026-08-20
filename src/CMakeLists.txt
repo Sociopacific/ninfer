@@ -65,6 +65,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/argmax.cu
   ops/launcher/cast.cu
   ops/launcher/causal_conv1d.cu
+  ops/launcher/dflash_conv.cu
   ops/launcher/embed_gather.cu
   ops/launcher/gdn_gating.cu
   ops/launcher/gelu.cu
@@ -228,6 +229,7 @@ add_library(ninfer_ops STATIC
   ops/wrapper/argmax.cpp
   ops/wrapper/cast.cpp
   ops/wrapper/causal_conv1d_silu.cpp
+  ops/wrapper/dflash_conv.cpp
   ops/wrapper/embedding.cpp
   ops/wrapper/gdn_gating.cpp
   ops/wrapper/gdn_gating_proj.cpp

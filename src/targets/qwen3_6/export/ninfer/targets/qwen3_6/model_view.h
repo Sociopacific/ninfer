@@ -57,6 +57,15 @@ struct OptimizedProposalWeights {
     Tensor token_ids;
 };
 
+// A DFlash2 grouped dynamic causal convolution.  Half the kernel is static
+// (base_kernel) and half is predicted per token by kernel_projection; the two
+// halves along the leading axis serve the prepare and finish steps that
+// bracket the attention or MLP block.  Empty on DFlash v1.
+struct DFlashConvWeights {
+    Tensor base_kernel;
+    Weight kernel_projection;
+};
+
 struct DFlashLayerWeights {
     Tensor input_norm;
     Weight query_key_value;
@@ -68,6 +77,17 @@ struct DFlashLayerWeights {
     Tensor post_attention_norm;
     Weight gate_up;
     Weight down;
+    DFlashConvWeights attention_convolution;
+    DFlashConvWeights mlp_convolution;
+};
+
+// DFlash2 scores a block of candidates jointly: two rank-256 codebooks give
+// each predecessor/successor pair a compatibility term on top of the unary
+// logit.  Empty on DFlash v1, which takes an argmax per position instead.
+struct DFlashSelectorWeights {
+    Tensor hidden_projection;
+    Tensor predecessor_codebook;
+    Tensor successor_codebook;
 };
 
 template <std::size_t Layers>
@@ -76,6 +96,7 @@ struct DFlashWeights {
     Tensor context_norm;
     std::array<DFlashLayerWeights, Layers> layers;
     Tensor final_norm;
+    DFlashSelectorWeights selector;
 };
 
 template <class FullProjectionPayload, class GdnProjectionPayload, class MainPostMixerPayload,
