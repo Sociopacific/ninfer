@@ -150,9 +150,28 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     return graph_profiles_through(capacity - 1, ends);
 }
 
-std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t, std::uint32_t,
+std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t capacity,
+                                                                  std::uint32_t draft_window,
                                                                   std::uint32_t) {
-    return {};
+    if (draft_window == 0 || capacity == 0) { return {}; }
+    // Draft SWA and target verify both see W = E+K+1 visible keys. Bound the ranges at the
+    // ordinary split-policy transitions plus the verify grid landmarks the MTP profiles use.
+    std::vector<std::uint32_t> ends{96U, 127U, 511U, 1023U, 2047U, 4095U, 8191U, 16383U, 32767U};
+    const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
+        if (visible_end >= offset) { ends.push_back(visible_end - offset); }
+    };
+    for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
+        add_shifted(visible_end, draft_window + 1);
+    }
+    std::sort(ends.begin(), ends.end());
+    ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
+    std::vector<GraphExecutionProfile> profiles = graph_profiles_through(capacity - 1, ends);
+    // Kernel selection under these envelopes is not yet characterised for this target, so every
+    // range keeps its own captured topology instead of parameter-updating a shared executable.
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        profiles[index].topology_class = static_cast<std::uint32_t>(index);
+    }
+    return profiles;
 }
 
 void Variant::attention_projection(const Tensor& hidden,

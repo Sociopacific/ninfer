@@ -639,7 +639,9 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
             weights.query_key_value = artifact::materialized_weight(
                 backing, source.query_key_value, NumericFormat::Q4G64_F16S, 6144, 5120);
             // DFlash2 reuses one key/value projection for the precomputed
-            // target context and for the drafted block.
+            // target context and for the drafted block, so the block path reads the same two
+            // views and only the query rows are its own.
+            weights.query         = row_view(weights.query_key_value, 0, 4096);
             weights.context_key   = row_view(weights.query_key_value, 4096, 1024);
             weights.context_value = row_view(weights.query_key_value, 5120, 1024);
             weights.query_norm    = artifact::materialized_tensor(backing, source.query_norm,
@@ -656,13 +658,13 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
                                                             NumericFormat::Q4G64_F16S, 5120, 17408);
             weights.attention_convolution.base_kernel =
                 artifact::materialized_tensor(backing, source.attention_convolution.base_kernel,
-                                              NumericFormat::BF16, {2, 2, 5120});
+                                              NumericFormat::BF16, {5120, 2, 2});
             weights.attention_convolution.kernel_projection = artifact::materialized_weight(
                 backing, source.attention_convolution.kernel_projection,
                 NumericFormat::Q4G64_F16S, 1280, 5120);
             weights.mlp_convolution.base_kernel =
                 artifact::materialized_tensor(backing, source.mlp_convolution.base_kernel,
-                                              NumericFormat::BF16, {2, 2, 5120});
+                                              NumericFormat::BF16, {5120, 2, 2});
             weights.mlp_convolution.kernel_projection = artifact::materialized_weight(
                 backing, source.mlp_convolution.kernel_projection, NumericFormat::Q4G64_F16S, 1280,
                 5120);
@@ -670,13 +672,13 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
         dflash.final_norm = artifact::materialized_tensor(backing, plan.dflash.final_norm,
                                                           NumericFormat::BF16, {5120});
         dflash.selector.hidden_projection = artifact::materialized_tensor(
-            backing, plan.dflash.selector.hidden_projection, NumericFormat::BF16, {256, 5120});
+            backing, plan.dflash.selector.hidden_projection, NumericFormat::BF16, {5120, 256});
         dflash.selector.predecessor_codebook =
             artifact::materialized_tensor(backing, plan.dflash.selector.predecessor_codebook,
-                                          NumericFormat::BF16, {248320, 256});
+                                          NumericFormat::BF16, {256, 248320});
         dflash.selector.successor_codebook =
             artifact::materialized_tensor(backing, plan.dflash.selector.successor_codebook,
-                                          NumericFormat::BF16, {248320, 256});
+                                          NumericFormat::BF16, {256, 248320});
     }
 
     if (plan.features.vision) {

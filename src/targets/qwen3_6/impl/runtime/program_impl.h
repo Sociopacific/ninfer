@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -807,6 +809,14 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
                 speculative_backend == SpeculativeBackend::Mtp
                     ? mtp_host_egress->licensed_tokens.data() + row * width
                     : dflash_host_egress->licensed_tokens.data() + row * width;
+            if (std::getenv("NINFER_DFLASH_TRACE") != nullptr) {
+                std::fprintf(stderr, "[resolve] row=%zu base_E=%u base_S=%u committed=%u tok:",
+                             row, pending.base_E, pending.base_S, committed);
+                for (std::uint32_t i = 0; i < committed; ++i) {
+                    std::fprintf(stderr, " %d", static_cast<int>(token_base[i]));
+                }
+                std::fprintf(stderr, "\n");
+            }
             sequence.ledger.insert(sequence.ledger.end(), token_base, token_base + committed);
             sequence.prefix_identity.append_generated(committed, sequence.rope_delta);
             sequence.execution_frontier = pending.base_E + committed;
@@ -2114,6 +2124,14 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const std::span<const TokenId> row_tokens(dflash_host_egress->licensed_tokens.data() +
                                                           row * width,
                                                       static_cast<std::size_t>(count_i));
+            if (std::getenv("NINFER_DFLASH_TRACE") != nullptr) {
+                std::fprintf(stderr, "[round] row=%zu base_E=%u base_S=%u extent=%u count=%d acc=%d tok:",
+                             row, base_E, base_S, extent, count_i, accepted_i);
+                for (std::int32_t i = 0; i < count_i; ++i) {
+                    std::fprintf(stderr, " %d", static_cast<int>(row_tokens[static_cast<std::size_t>(i)]));
+                }
+                std::fprintf(stderr, "\n");
+            }
             validate_licensed_tokens(row_tokens);
             if (extent == 0) {
                 request.speculative_stats.fallback_steps += 1;

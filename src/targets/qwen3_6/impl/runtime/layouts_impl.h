@@ -486,19 +486,29 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                                                        width, batch),
                                      ops::bidirectional_gqa_attention_workspace_capacity_bytes(
                                          {0, plan.capacity}, width, width, batch)));
-                    scratch(layout, ops::linear_add_workspace_capacity_bytes(
-                                        QType::W8G32_F16S, DFlashConfig::hidden,
-                                        DFlashConfig::query_size, tokens, tokens));
+                    // DFlash2 replaces the fused output projection with linear followed by
+                    // the convolution finish, neither of which takes transient storage.
+                    if constexpr (!DFlashConfig::has_convolution) {
+                        scratch(layout, ops::linear_add_workspace_capacity_bytes(
+                                            QType::W8G32_F16S, DFlashConfig::hidden,
+                                            DFlashConfig::query_size, tokens, tokens));
+                    }
                 }
                 {
                     auto mlp = layout.scope();
                     (void)workspace_recipe::dflash_mlp<DFlashConfig>(layout, tokens);
-                    scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
-                                        QType::W8G32_F16S, 2 * DFlashConfig::intermediate,
-                                        DFlashConfig::hidden, tokens, tokens));
-                    scratch(layout, ops::linear_add_workspace_capacity_bytes(
-                                        QType::W8G32_F16S, DFlashConfig::hidden,
-                                        DFlashConfig::intermediate, tokens, tokens));
+                    if constexpr (DFlashConfig::has_convolution) {
+                        scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
+                                            QType::Q4G64_F16S, 2 * DFlashConfig::intermediate,
+                                            DFlashConfig::hidden, tokens, tokens));
+                    } else {
+                        scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
+                                            QType::W8G32_F16S, 2 * DFlashConfig::intermediate,
+                                            DFlashConfig::hidden, tokens, tokens));
+                        scratch(layout, ops::linear_add_workspace_capacity_bytes(
+                                            QType::W8G32_F16S, DFlashConfig::hidden,
+                                            DFlashConfig::intermediate, tokens, tokens));
+                    }
                 }
                 matrix(layout, DType::BF16, DFlashConfig::hidden, drafts * batch);
                 matrix(layout, DType::BF16, DFlashConfig::hidden, drafts * batch);

@@ -260,11 +260,16 @@ struct DFlashAttentionRoots {
     Tensor query;
     Tensor key;
     Tensor attention;
+    // DFlash2 only: both halves of the convolution kernel, the prepared projection input, and the
+    // output projection the finish half folds into the residual.
+    Tensor dynamic;
+    Tensor convolved;
+    Tensor output;
 };
 
 template <class Config, class Allocator>
 DFlashAttentionRoots dflash_attention(Allocator& allocator, std::int32_t tokens) {
-    return {
+    DFlashAttentionRoots roots{
         matrix(allocator, DType::BF16, Config::hidden, tokens),
         matrix(allocator, DType::BF16, Config::query_size, tokens),
         matrix(allocator, DType::BF16, Config::kv_size, tokens),
@@ -273,19 +278,35 @@ DFlashAttentionRoots dflash_attention(Allocator& allocator, std::int32_t tokens)
         matrix(allocator, DType::BF16, Config::kv_size, tokens),
         matrix(allocator, DType::BF16, Config::query_size, tokens),
     };
+    if constexpr (Config::has_convolution) {
+        roots.dynamic = matrix(allocator, DType::BF16, Config::conv_projection_rows, tokens);
+        roots.convolved = matrix(allocator, DType::BF16, Config::hidden, tokens);
+        roots.output    = matrix(allocator, DType::BF16, Config::hidden, tokens);
+    }
+    return roots;
 }
 
 struct DFlashMlpRoots {
     Tensor hidden;
     Tensor intermediate;
+    // DFlash2 only, mirroring DFlashAttentionRoots.
+    Tensor dynamic;
+    Tensor convolved;
+    Tensor output;
 };
 
 template <class Config, class Allocator>
 DFlashMlpRoots dflash_mlp(Allocator& allocator, std::int32_t tokens) {
-    return {
+    DFlashMlpRoots roots{
         matrix(allocator, DType::BF16, Config::hidden, tokens),
         matrix(allocator, DType::BF16, Config::intermediate, tokens),
     };
+    if constexpr (Config::has_convolution) {
+        roots.dynamic = matrix(allocator, DType::BF16, Config::conv_projection_rows, tokens);
+        roots.convolved = matrix(allocator, DType::BF16, Config::hidden, tokens);
+        roots.output    = matrix(allocator, DType::BF16, Config::hidden, tokens);
+    }
+    return roots;
 }
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::workspace_recipe

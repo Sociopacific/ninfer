@@ -5,6 +5,7 @@
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
+#include "ninfer/ops/dflash_conv.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/kv_cache_append_prefix.h"
 #include "ninfer/ops/linear.h"
@@ -154,8 +155,17 @@ void append_context_impl(Context& state, const Tensor& features, const Tensor& p
                 layer_roots.value.view({Config::head_dim, Config::kv_heads, layer_columns});
             Tensor key_flat   = key_raw.view({Config::kv_size, layer_columns});
             Tensor value_flat = value.view({Config::kv_size, layer_columns});
-            ops::linear_pair(layer_context, weight.context_key, weight.context_value, key_flat,
-                             value_flat, state.execution.device.stream);
+            if constexpr (Config::has_convolution) {
+                // DFlash2 carries key and value as row views of one Q4 weight, and the paired
+                // launch is W8 only, so the two projections run separately.
+                ops::linear(layer_context, weight.context_key, key_flat,
+                            state.execution.device.stream);
+                ops::linear(layer_context, weight.context_value, value_flat,
+                            state.execution.device.stream);
+            } else {
+                ops::linear_pair(layer_context, weight.context_key, weight.context_value, key_flat,
+                                 value_flat, state.execution.device.stream);
+            }
             Tensor key = layer_roots.key.view({Config::head_dim, Config::kv_heads, layer_columns});
             ops::rmsnorm(key_raw, weight.key_norm, Config::rms_epsilon, false, key,
                          state.execution.device.stream);
@@ -220,8 +230,29 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_6::DFlashDecodeState& f
                 Tensor query_flat = query_raw.view({Config::query_size, columns});
                 Tensor key_flat   = key_raw.view({Config::kv_size, columns});
                 Tensor value_flat = value.view({Config::kv_size, columns});
-                ops::attn_input_proj(roots.hidden, weight.query_key_value, query_flat, key_flat,
-                                     value_flat, state.execution.device.stream);
+                if constexpr (Config::has_convolution) {
+                    // One projection yields both halves of the convolution kernel: the prepare
+                    // half shapes what attention sees, the finish half what it returns.
+                    ops::linear(roots.hidden, weight.attention_convolution.kernel_projection,
+                                roots.dynamic, state.execution.device.stream);
+                    Tensor convolved =
+                        roots.convolved.view({Config::hidden, width, batch_size});
+                    ops::dflash_conv(
+                        roots.hidden.view({Config::hidden, width, batch_size}),
+                        weight.attention_convolution.base_kernel,
+                        roots.dynamic.view({Config::conv_projection_rows, width, batch_size}),
+                        ops::DFlashConvStage::Prepare, false, convolved,
+                        state.execution.device.stream);
+                    ops::linear(roots.convolved, weight.query, query_flat,
+                                state.execution.device.stream);
+                    ops::linear(roots.convolved, weight.context_key, key_flat,
+                                state.execution.device.stream);
+                    ops::linear(roots.convolved, weight.context_value, value_flat,
+                                state.execution.device.stream);
+                } else {
+                    ops::attn_input_proj(roots.hidden, weight.query_key_value, query_flat, key_flat,
+                                         value_flat, state.execution.device.stream);
+                }
                 Tensor query = roots.query.view({Config::head_dim, Config::query_heads, columns});
                 Tensor key   = roots.key.view({Config::head_dim, Config::kv_heads, columns});
                 ops::rmsnorm(query_raw, weight.query_norm, Config::rms_epsilon, false, query,
@@ -251,19 +282,60 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_6::DFlashDecodeState& f
                         envelopes.full, state.execution.work, attention_batch,
                         state.execution.device.stream);
                 }
-                ops::linear_add(roots.attention.view({Config::query_size, columns}),
-                                weight.attention_output, residual, state.execution.work,
+                if constexpr (Config::has_convolution) {
+                    // The convolution sits between the projection and the residual add, so the
+                    // fused linear_add does not apply; the finish half folds the residual in.
+                    ops::linear(roots.attention.view({Config::query_size, columns}),
+                                weight.attention_output, roots.output,
                                 state.execution.device.stream);
+                    Tensor residual_blocks =
+                        residual.view({Config::hidden, width, batch_size});
+                    ops::dflash_conv(
+                        roots.output.view({Config::hidden, width, batch_size}),
+                        weight.attention_convolution.base_kernel,
+                        roots.dynamic.view({Config::conv_projection_rows, width, batch_size}),
+                        ops::DFlashConvStage::Finish, true, residual_blocks,
+                        state.execution.device.stream);
+                } else {
+                    ops::linear_add(roots.attention.view({Config::query_size, columns}),
+                                    weight.attention_output, residual, state.execution.work,
+                                    state.execution.device.stream);
+                }
             }
             {
                 auto mlp_scope = state.execution.work.scope();
                 auto roots = workspace_recipe::dflash_mlp<Config>(state.execution.work, columns);
                 ops::rmsnorm(residual, weight.post_attention_norm, Config::rms_epsilon, false,
                              roots.hidden, state.execution.device.stream);
-                ops::linear_swiglu(roots.hidden, weight.gate_up, roots.intermediate,
-                                   state.execution.work, state.execution.device.stream);
-                ops::linear_add(roots.intermediate, weight.down, residual, state.execution.work,
+                if constexpr (Config::has_convolution) {
+                    ops::linear(roots.hidden, weight.mlp_convolution.kernel_projection,
+                                roots.dynamic, state.execution.device.stream);
+                    Tensor convolved =
+                        roots.convolved.view({Config::hidden, width, batch_size});
+                    ops::dflash_conv(
+                        roots.hidden.view({Config::hidden, width, batch_size}),
+                        weight.mlp_convolution.base_kernel,
+                        roots.dynamic.view({Config::conv_projection_rows, width, batch_size}),
+                        ops::DFlashConvStage::Prepare, false, convolved,
+                        state.execution.device.stream);
+                    ops::linear_swiglu(roots.convolved, weight.gate_up, roots.intermediate,
+                                       state.execution.work, state.execution.device.stream);
+                    ops::linear(roots.intermediate, weight.down, roots.output,
                                 state.execution.device.stream);
+                    Tensor residual_blocks =
+                        residual.view({Config::hidden, width, batch_size});
+                    ops::dflash_conv(
+                        roots.output.view({Config::hidden, width, batch_size}),
+                        weight.mlp_convolution.base_kernel,
+                        roots.dynamic.view({Config::conv_projection_rows, width, batch_size}),
+                        ops::DFlashConvStage::Finish, true, residual_blocks,
+                        state.execution.device.stream);
+                } else {
+                    ops::linear_swiglu(roots.hidden, weight.gate_up, roots.intermediate,
+                                       state.execution.work, state.execution.device.stream);
+                    ops::linear_add(roots.intermediate, weight.down, residual,
+                                    state.execution.work, state.execution.device.stream);
+                }
             }
         }
 

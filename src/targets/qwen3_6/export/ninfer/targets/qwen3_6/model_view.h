@@ -69,6 +69,9 @@ struct DFlashConvWeights {
 struct DFlashLayerWeights {
     Tensor input_norm;
     Weight query_key_value;
+    // Row views of query_key_value. DFlash2 projects the precomputed target context and
+    // the drafted block through the same key and value rows.
+    Weight query;
     Weight context_key;
     Weight context_value;
     Tensor query_norm;
