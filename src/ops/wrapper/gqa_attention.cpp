@@ -19,6 +19,10 @@ constexpr std::int32_t kQuantGroup                   = 64;
 constexpr float kExpectedScale                       = 0.0625f;
 constexpr std::int32_t kSmallTChunkTokens            = 6;
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
+// Геометрии, под которые инстанцирован SmallT-лаунчер (launcher/gqa_attention_decode.cu):
+// Gqa27Geometry = GqaGeometry<24, 4, 1>, Gqa35Geometry = GqaGeometry<16, 2, 2>.
+constexpr std::int32_t kSmallT27QueryHeads           = 24;
+constexpr std::int32_t kSmallT35QueryHeads           = 16;
 constexpr std::int32_t kMaximumBatchSize             = 8;
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
 constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
@@ -349,8 +353,8 @@ GqaAttentionRoute gqa_attention_resolve_route(std::int32_t q_heads, std::int32_t
     if (batch_size > 1) { return GqaAttentionRoute::ChunkedSmallT; }
     const std::uint32_t prompt_visible_keys =
         width <= 2 * kSmallTChunkTokens ? kTwoChunkPromptVisibleKeys : kThreeChunkPromptVisibleKeys;
-    if (q_heads == 16 && width <= kMaximumVerifyTokens &&
-        envelope.max_visible_keys > prompt_visible_keys) {
+    if ((q_heads == kSmallT35QueryHeads || q_heads == kSmallT27QueryHeads) &&
+        width <= kMaximumVerifyTokens && envelope.max_visible_keys > prompt_visible_keys) {
         return GqaAttentionRoute::ChunkedSmallT;
     }
     return GqaAttentionRoute::Prompt;
