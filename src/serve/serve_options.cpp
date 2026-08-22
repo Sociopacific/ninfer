@@ -297,7 +297,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
-    if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
+    // Совместимость dflash+vision не подтверждена численно, но запрет мешает
+    // замерять ёмкость: она считается до первого токена. Escape-hatch для стенда.
+    if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision &&
+        std::getenv("NINFER_ALLOW_DFLASH_VISION") == nullptr) {
         throw std::invalid_argument("--spec dflash cannot be combined with --vision");
     }
     if (default_max_tokens_explicit) {
