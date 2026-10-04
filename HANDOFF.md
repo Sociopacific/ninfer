@@ -1,3 +1,11 @@
+## Default-window verification, 2026-10-04
+
+Live models reports700000. Startup restored8 sessions before listening. Claude Code modelUsage reports1000000 for local-qwen3.8-27b[1m] and answers correctly. A streaming request over700K is refused in1.98s with HTTP400 invalid_request_error/prompt is too long through ClaudeRipple. Actual client compaction after this error was not exercised. Both max-context and kv-capacity must change together; leaving KV712704 with context700000 fails startup. Old container is retained stopped with restart=no; do not start two GPU servers simultaneously.
+
+## Requested context defaults, 2026-10-04
+
+Server max-context is700000; KV capacity is also700000 (the runtime page allocation rounds to700032). ClaudeRipple advertises1M through local-qwen3.8-27b[1m], as explicitly requested. claude-qwen now only selects that alias and removes old session capacity overrides. The model name no longer includes vision; vision remains enabled. Old container and argv are retained as before700k backups.
+
 ## Fork publication, 2026-10-04
 
 User requested push. Native cache implementation, Linux portability fixes and portable launch profile are committed on homelab/qwen38-native-cache and published to https://github.com/Sociopacific/ninfer/tree/homelab/qwen38-native-cache. user-fork points to Sociopacific/ninfer; original origin is preserved. Weights and disk snapshots are excluded. Active server unchanged. ClaudeRipple uses OpenAI-compatible localhost18080 via a persistent Mac SSH tunnel; native Anthropic real-Claude-Code probe failed on multiple System blocks. The session-only claude-qwen launcher verifies client contextWindow712704; default custom-model selection still reports200000.

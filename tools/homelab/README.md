@@ -1,6 +1,6 @@
 # Single RTX 5090 native session cache profile
 
-This experimental setup uses Qwen3.8-27B NVFP4full, vision, NVFP4 KV, YaRN3 and MTP7. It has a 712704-token technical capacity, prefill chunk1024, one active request, eight private continuations and 32GiB Host KV. The native persistence implementation was exercised with 514988 input tokens plus two images. The full 710K persistence roundtrip remains untested; the GPU memory margin is small.
+This experimental setup uses Qwen3.8-27B NVFP4full, vision, NVFP4 KV, YaRN3 and MTP7. The default request limit is700000 tokens with a700000-token KV pool, prefill chunk1024, one active request, eight private continuations and 32GiB Host KV. The native persistence implementation was exercised with 514988 input tokens plus two images. The full 710K persistence roundtrip remains untested; the GPU memory margin is small.
 
 Build the serve target using `cmake --build build --target ninfer-serve -j` after configuring the repository's CUDA toolchain. Supply your own compatible `.ninfer` artifact; weights and session snapshots are not included.
 
@@ -20,3 +20,5 @@ Wait for durable status before relying on a snapshot across restart. HTTP202 onl
 Observed on the qualified host: initial native D2H10.24GB in0.725s; capture10.40GB in1.47s when main KV was already in Host RAM; background durable save47.64s. Cold disk restore10.57s, warm filesystem-cache restore0.80s; restored515K prompt preparation about0.776s including H2D and five new tokens. These are different phases and workloads, not a uniform latency guarantee. Three independent40/40/48K vision sessions survived restart; three independent500K sessions were not tested. Twenty consecutive truncated imports were rejected, followed by a successful valid import in the same process.
 
 The NVFP4 envelope extension is experimental and marked TEMP-REMOVE in source. Physical cold disk latency, temporary RAM duplication during save, power-loss fault injection and same-length payload corruption remain limitations or untested scenarios.
+
+ClaudeRipple exposes local-qwen3.8-27b[1m] to Claude with a1M client window while the server enforces700000. This intentional mismatch requires the server overflow response to reach Claude as invalid_request_error/prompt is too long; the picker name is Qwen3.8 27B (homelab).

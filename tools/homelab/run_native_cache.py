@@ -13,8 +13,8 @@ parser.add_argument('--host', default='127.0.0.1')
 parser.add_argument('--port', default='18080')
 args = parser.parse_args()
 command = [args.binary, args.model, '--host', args.host, '--port', args.port,
-           '--model-id', 'qwen3.8-27b', '--max-context', '712704',
-           '--kv-capacity', '712704', '--max-concurrency', '1',
+           '--model-id', 'qwen3.8-27b', '--max-context', '700000',
+           '--kv-capacity', '700000', '--max-concurrency', '1',
            '--kv-dtype', 'nvfp4', '--rope-scaling', 'yarn:3', '--vision',
            '--spec', 'mtp', '--draft-tokens', '7', '--device-state-slots', '0',
            '--prefill-chunk', '1024', '--host-kv-mib', '32768',
