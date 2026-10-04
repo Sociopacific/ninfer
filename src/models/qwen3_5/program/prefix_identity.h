@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <span>
 #include <vector>
 
@@ -15,6 +16,15 @@ namespace ninfer::models::qwen3_5::detail {
 
 class ResidentPrefixIdentity {
 public:
+    template<class Archive> void archive(Archive& ar) {
+        ar(token_types_); for (auto& positions : positions_) ar(positions);
+        std::uint64_t count = vision_items_.size(); ar(count); if (count > 1048576) throw std::runtime_error("invalid checkpoint media count"); vision_items_.resize(count);
+        for (auto& item : vision_items_) {
+            ar(item.modality); ar(item.grid); ar(item.patch_begin); ar(item.patch_count);
+            ar(item.content_digest); ar(item.timestamps); ar(item.token_spans);
+        }
+        ar(rewrite_execution_frontiers_);
+    }
     void reserve(std::size_t tokens);
     void clear() noexcept;
     void assign(const PreparedPromptData& prompt);
@@ -41,6 +51,7 @@ private:
 // exact identity avoids retaining hash-only state in immutable capture backings.
 class PrefixShortlistDigests {
 public:
+    template<class Archive> void archive(Archive& ar) { ar(digests_); }
     void reserve(std::size_t tokens);
     void clear() noexcept;
     void assign(const PreparedPromptData& prompt);

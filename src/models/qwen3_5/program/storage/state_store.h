@@ -3,6 +3,7 @@
 #include "models/qwen3_5/state/state_image.h"
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -121,6 +122,26 @@ public:
     StateImageStore(StateImageStore&&)                 = delete;
     StateImageStore& operator=(StateImageStore&&)      = delete;
 
+    [[nodiscard]] qwen3_5::HostStateImageConstView checkpoint_host_view(StateImageHandle handle) const {
+        const Object& object = require(handle);
+        if (!host_ || !object.host_slot || object.role != StateImageRole::CheckpointImmutable)
+            throw std::logic_error("checkpoint state is not resident in Host");
+        return host_->view(*object.host_slot);
+    }
+    [[nodiscard]] StateImageHandle import_checkpoint(const std::byte* bytes, std::size_t count) {
+        if (!host_ || count != host_->layout().image_bytes)
+            throw std::invalid_argument("checkpoint state layout mismatch");
+        auto handle = reserve_logical_destination();
+        if (!handle) throw std::runtime_error("checkpoint state descriptors exhausted");
+        auto slot = host_->allocate();
+        if (!slot) { (void)release(*handle); throw std::runtime_error("checkpoint Host state pool exhausted"); }
+        Object& object = require(*handle);
+        object.host_slot = *slot;
+        std::memcpy(host_->writable_view(*slot).data, bytes, count);
+        object.content_epoch = next_epoch();
+        object.role = StateImageRole::CheckpointImmutable;
+        return *handle;
+    }
     [[nodiscard]] std::uint32_t capacity() const noexcept {
         return static_cast<std::uint32_t>(objects_.size());
     }

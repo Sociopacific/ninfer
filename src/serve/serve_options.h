@@ -24,6 +24,7 @@ struct ServeOptions {
     bool help_requested = false;
     std::string artifact_path;
     std::filesystem::path chat_template_path;
+    std::filesystem::path cache_restore_directory;
     std::string host = "127.0.0.1";
     int port         = 8080;
     std::string api_key;                          // empty => no auth

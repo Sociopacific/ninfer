@@ -35,6 +35,8 @@ constexpr std::int32_t kMaximumBatchSize    = 8;
 
 // hq-e8-2b reaches the absolute envelope ceiling; the linear cache types stop at their own.
 constexpr std::uint32_t visible_key_ceiling(KvCacheStorage storage) {
+    // TEMP-REMOVE: experimental NVFP4 envelope; retain qualified limits for other cache types.
+    if (storage == KvCacheStorage::Nvfp4Group16) return 786432;
     return storage == KvCacheStorage::HqE8Rice2B ? kCausalAttentionMaximumVisibleKeys
                                                  : kCausalAttentionMaximumLinearVisibleKeys;
 }

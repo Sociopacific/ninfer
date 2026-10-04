@@ -1,3 +1,7 @@
+#include "core/cache_archive.h"
+#include <cstring>
+#include <future>
+#include <mutex>
 #include "ninfer/engine.h"
 
 #include "core/device.h"
@@ -178,6 +182,9 @@ public:
         } catch (...) {}
     }
 
+    std::mutex checkpoint_mutex;
+    std::future<double> checkpoint_job;
+    Engine::CacheCheckpointStatus checkpoint_status;
     EngineOptions options;
     DeviceContext device;
     std::unique_ptr<runtime::ModelInstance> active;
@@ -426,3 +433,98 @@ void Engine::reset_memory_peaks() noexcept {
 }
 
 } // namespace ninfer
+
+namespace ninfer {
+namespace {
+std::array<std::uint8_t,16> artifact_cache_id(const std::filesystem::path& path) {
+    std::ifstream file(path,std::ios::binary); file.seekg(16);
+    std::array<std::uint8_t,16> id; file.read(reinterpret_cast<char*>(id.data()),id.size());
+    if (!file) throw std::runtime_error("cannot read cache artifact identity"); return id;
+}
+}
+Engine::CacheCheckpointStatus Engine::start_cache_save(const std::filesystem::path& directory) {
+    if (!impl_) throw std::logic_error("Engine is moved from");
+    std::lock_guard lock(impl_->checkpoint_mutex);
+    if (impl_->checkpoint_job.valid()) {
+        if (impl_->checkpoint_job.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            throw std::runtime_error("a cache checkpoint is already being persisted");
+        try { impl_->checkpoint_job.get(); } catch (...) {}
+        impl_->checkpoint_status.writing=false;
+    }
+    auto* core = std::get_if<std::unique_ptr<Impl::GenerationCore>>(&impl_->core);
+    if (!core || !*core) throw std::logic_error("cache checkpoints require generation mode");
+    std::filesystem::create_directories(directory);
+    const auto started=std::chrono::steady_clock::now();
+    const std::string snapshot=std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    cache_archive::Publications files;
+    cache_archive::Payloads payloads;
+    cache_archive::CaptureStats metrics;
+    std::uint32_t count;
+    {
+        cache_archive::DeferPublication defer(files,&metrics,&payloads);
+        cache_archive::Writer config(directory/("config-"+snapshot+".tmp"));
+        config(std::uint32_t(1)); config(artifact_cache_id(impl_->options.artifact_path));
+        config(impl_->options.kv_cache); config(impl_->options.rope_scaling_factor);
+        config(impl_->options.rope_scaling_temperature); config(impl_->options.rope_scaling_beta_fast);
+        config(impl_->options.rope_scaling_beta_slow); config(impl_->options.speculative.backend);
+        config(impl_->options.speculative.draft_tokens); config(impl_->options.speculative.proposal_head);
+        config.close();
+        count=(*core)->cache_checkpoint(directory,false,snapshot);
+        cache_archive::publish(directory/("config-"+snapshot+".tmp"),directory/("config-"+snapshot+".bin"));
+        cache_archive::Writer current(directory/"CURRENT.tmp"); current(snapshot); current.close();
+        cache_archive::publish(directory/"CURRENT.tmp",directory/"CURRENT");
+    }
+    impl_->checkpoint_status={.sessions=count,.capture_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count(),
+        .device_to_host_bytes=metrics.device_to_host_bytes,.device_to_host_seconds=metrics.device_to_host_seconds,
+        .payload_bytes_written=metrics.payload_bytes_written,.writing=true};
+    impl_->checkpoint_job=std::async(std::launch::async,[files=std::move(files),payloads=std::move(payloads),started]() mutable {
+        cache_archive::write_payloads(payloads);
+        for (auto& [temporary,final] : files) cache_archive::publish(temporary,final);
+        return std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    });
+    return impl_->checkpoint_status;
+}
+Engine::CacheCheckpointStatus Engine::cache_save_status() {
+    if (!impl_) throw std::logic_error("Engine is moved from");
+    std::lock_guard lock(impl_->checkpoint_mutex);
+    if (impl_->checkpoint_job.valid() && impl_->checkpoint_job.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        try { impl_->checkpoint_status.durable_seconds=impl_->checkpoint_job.get(); impl_->checkpoint_status.durable=true; }
+        catch (const std::exception& error) { impl_->checkpoint_status.error=error.what(); }
+        impl_->checkpoint_status.writing=false;
+    }
+    return impl_->checkpoint_status;
+}
+std::uint32_t Engine::save_cache(const std::filesystem::path& directory) {
+    auto status=start_cache_save(directory);
+    for (;;) {
+        status=cache_save_status();
+        if (!status.writing) {
+            if (!status.error.empty()) throw std::runtime_error(status.error);
+            return status.sessions;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+std::uint32_t Engine::load_cache(const std::filesystem::path& directory) {
+    if (!impl_) throw std::logic_error("Engine is moved from");
+    auto* core=std::get_if<std::unique_ptr<Impl::GenerationCore>>(&impl_->core);
+    if (!core || !*core) throw std::logic_error("cache checkpoints require generation mode");
+    std::lock_guard lock(impl_->checkpoint_mutex);
+    if (impl_->checkpoint_job.valid()) { impl_->checkpoint_job.get(); impl_->checkpoint_status.writing=false; }
+    cache_archive::Reader current(directory/"CURRENT"); std::string snapshot; current(snapshot);
+    cache_archive::Reader config(directory/("config-"+snapshot+".bin"));
+    std::uint32_t version; std::array<std::uint8_t,16> id; KvCacheStorage storage;
+    float factor,temperature,fast,slow; SpeculativeOptions speculative;
+    config(version); config(id); config(storage); config(factor); config(temperature);
+    config(fast); config(slow); config(speculative.backend); config(speculative.draft_tokens); config(speculative.proposal_head);
+    if (version != 1 || id != artifact_cache_id(impl_->options.artifact_path) ||
+        storage != impl_->options.kv_cache || factor != impl_->options.rope_scaling_factor ||
+        temperature != impl_->options.rope_scaling_temperature || fast != impl_->options.rope_scaling_beta_fast ||
+        slow != impl_->options.rope_scaling_beta_slow ||
+        (speculative.backend != impl_->options.speculative.backend ||
+         speculative.draft_tokens != impl_->options.speculative.draft_tokens ||
+         speculative.proposal_head != impl_->options.speculative.proposal_head))
+        throw std::runtime_error("cache checkpoint artifact or execution configuration mismatch");
+    return (*core)->cache_checkpoint(directory,true,snapshot);
+}
+}

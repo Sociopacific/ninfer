@@ -233,6 +233,19 @@ public:
         return Submission(*this, std::move(request));
     }
 
+    std::uint32_t cache_checkpoint(const std::filesystem::path& directory, bool restore, const std::string& snapshot) {
+        std::scoped_lock execution_lock(execution_mutex_);
+        {
+            std::lock_guard queue_lock(queue_mutex_);
+            if (outstanding_ != 0 || stopping_ || failed_)
+                throw std::runtime_error("cache checkpoint requires an idle available engine");
+        }
+        device_.bind_to_current_thread(); device_.synchronize();
+        auto count = restore ? resources_.load_checkpoints(*instance_.program,directory,snapshot)
+                             : resources_.save_checkpoints(*instance_.program,directory,snapshot);
+        if (restore) next_publication_order_ = std::max(next_publication_order_,std::uint64_t(count)+1);
+        return count;
+    }
     [[nodiscard]] MemorySummary memory_summary() const {
         std::scoped_lock lock(execution_mutex_);
         MemorySummary out                      = instance_.program->memory_summary();

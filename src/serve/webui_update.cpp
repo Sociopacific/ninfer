@@ -1,3 +1,4 @@
+#ifdef _WIN32
 // webui_update.cpp — keeps a local copy of the prebuilt llama.cpp webui current.
 //
 // Upstream llama.cpp publishes the built webui (tools/ui static output) to the
@@ -378,3 +379,19 @@ std::string ensure_webui_available(const std::string& webui_dir) {
 }
 
 } // namespace ninfer::serve
+#else
+#include "serve/webui_update.h"
+#include <filesystem>
+#include <stdexcept>
+namespace ninfer::serve {
+std::string resolve_webui_dir(const ServeOptions& options) {
+    if (!options.webui_dir.empty()) return options.webui_dir;
+    auto parent = std::filesystem::path(options.artifact_path).parent_path();
+    if (parent.empty()) parent = ".";
+    return (parent / "webui").lexically_normal().string();
+}
+std::string ensure_webui_available(const std::string&) {
+    throw std::runtime_error("WebUI auto-download is Windows-only; use --webui-dir on Linux.");
+}
+}
+#endif

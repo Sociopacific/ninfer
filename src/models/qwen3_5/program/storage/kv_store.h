@@ -269,6 +269,17 @@ public:
 
     [[nodiscard]] std::uint32_t occupied() const noexcept { return capacity() - free_count_; }
 
+    [[nodiscard]] LogicalKVPageHandle import_host_page(std::uint32_t columns) {
+        if (!free_count_ || !columns || columns > kPagedKVPageSize)
+            throw std::runtime_error("invalid checkpoint KV page capacity");
+        const std::uint32_t index = free_[--free_count_];
+        Page& page = pages_[index];
+        page.content_epoch = next_epoch(page.content_epoch);
+        page.committed_columns = columns;
+        page.references = 1; page.writer_references = 0;
+        page.active_references = 0; page.protected_columns = 0; page.occupied = true;
+        return LogicalKVPageHandle(this, index, page.generation);
+    }
     [[nodiscard]] LogicalKVPageHandle materialize(DeviceKVPageReservation& reservation) {
         if (free_count_ == 0) {
             throw std::logic_error("logical KV descriptors exhausted before physical capacity");
@@ -887,6 +898,19 @@ public:
         return KVAddressSpaceHandle(this, index, address.generation);
     }
 
+    [[nodiscard]] KVAddressSpaceHandle import_host_pages(std::span<const LogicalKVPageHandle> pages,
+                                                         std::uint32_t frontier) {
+        if (pages.size() != pages_for_tokens(frontier) || pages.size() > page_capacity_)
+            throw std::invalid_argument("checkpoint KV address shape mismatch");
+        auto handle = create_inactive();
+        if (!handle) throw std::runtime_error("checkpoint KV address descriptors exhausted");
+        Address& address = require(*handle);
+        for (std::uint32_t index = 0; index < pages.size(); ++index) membership(address, index) = pages[index];
+        address.page_count = pages.size(); address.committed_frontier = frontier;
+        address.side_written_frontier = frontier;
+        set_checkpoint_requirement(*handle, frontier);
+        return *handle;
+    }
     [[nodiscard]] bool valid(KVAddressSpaceHandle handle) const noexcept {
         return handle.owner_ == this && handle.index_ < addresses_.size() &&
                addresses_[handle.index_].occupied &&

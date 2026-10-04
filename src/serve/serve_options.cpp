@@ -71,7 +71,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
-           "[--context-cost-presets FILE] "
+           "[--context-cost-presets FILE] [--cache-restore-directory DIR] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
@@ -149,6 +149,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         };
         if (arg == "--host") {
             options.host = require_value("--host");
+        } else if (arg == "--cache-restore-directory") {
+            options.cache_restore_directory = require_value("--cache-restore-directory");
+            if (options.cache_restore_directory.empty())
+                throw std::invalid_argument("--cache-restore-directory must not be empty");
         } else if (arg == "--port") {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {

@@ -1022,3 +1022,34 @@ decoding.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.
+
+
+## Native session cache checkpoints
+
+For the local NVFP4 Qwen3.8 deployment, `POST /cache/save` accepts
+`{"directory":"/absolute/cache/path","async":true}`. Capture requires an idle Engine.
+It transfers missing KV and recurrent/MTP state to Host memory, prepares independent RAM
+buffers in parallel, and releases the GPU executor before the background disk writer runs.
+Model weights and CUDA workspaces are not persisted. Background staging temporarily needs
+RAM equal to the new payload bytes, in addition to the configured Host pools.
+
+`GET /cache/status` reports sessions, capture time, device-to-host bytes and CUDA transfer
+time, new payload bytes, writing/durable state, durable wall time and errors. The
+`payload_bytes_written` field records new payload bytes scheduled for persistence; bytes
+are durable only when `durable` is true. With `async:false` (the default), save waits for
+durable publication. A snapshot is published by replacing CURRENT after payloads and
+snapshot-specific metadata are fsynced. Failed publication preserves the previous CURRENT.
+Unchanged immutable files are reused, including after process restart. Old snapshots and
+unreferenced files are retained; automatic disk garbage collection is not implemented.
+
+`POST /cache/load` accepts the same directory and restores into an idle Engine with an
+empty private catalog. The artifact identity, KV format, RoPE and speculative configuration
+must match. Host pools and continuation capacity must be sufficient. Restored logical
+handles are newly allocated; a subsequent request transfers the selected cache to GPU
+without repeating the reused prefix's prefill. A truncated payload rejects restoration and
+rolls back the imported ownership. A failed operation returns an error; it is not a partial
+successful restore.
+
+`--cache-restore-directory DIR` restores a published snapshot during server startup,
+before HTTP serving begins. An incompatible or damaged snapshot aborts startup. Save new
+snapshots explicitly through the API; startup restoration does not enable automatic saves.

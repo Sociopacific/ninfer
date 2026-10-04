@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "core/cache_archive.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "runtime/engine/context_cache/context_cost.h"
@@ -244,6 +245,60 @@ public:
         std::optional<Choice> choice;
     };
 
+    std::uint32_t save_checkpoints(Program& program, const std::filesystem::path& directory, const std::string& snapshot) {
+        std::filesystem::create_directories(directory);
+        cache_archive::Writer manifest(directory/("catalog-"+snapshot+".tmp"));
+        std::uint32_t count = 0;
+        for (auto& entry : catalog_) if (entry.state == CatalogState::Catalogued && entry.handle) ++count;
+        manifest(count);
+        for (auto& entry : catalog_) {
+            if (entry.state != CatalogState::Catalogued || !entry.handle) continue;
+            std::string name = "continuation-" + std::to_string(entry.id) + "-" + std::to_string(entry.revision) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin";
+            program.save_continuation(*entry.handle, directory/name);
+            manifest(name); manifest(entry.session.has_value());
+            if (entry.session) manifest(*entry.session);
+            manifest(entry.retention);
+        }
+        manifest.close(); cache_archive::publish(directory/("catalog-"+snapshot+".tmp"),directory/("catalog-"+snapshot+".bin"));
+        return count;
+    }
+    std::uint32_t load_checkpoints(Program& program, const std::filesystem::path& directory, const std::string& snapshot) {
+        for (auto& entry : catalog_) if (entry.state != CatalogState::Vacant)
+            throw std::logic_error("cache restore requires an empty private catalog");
+        cache_archive::Reader manifest(directory/("catalog-"+snapshot+".bin"));
+        std::uint32_t count; manifest(count);
+        if (count > catalog_count_) throw std::runtime_error("checkpoint private catalog exceeds capacity");
+        try {
+            for (std::uint32_t index=0; index<count; ++index) {
+                std::string name; bool session; RetentionClass retention;
+                manifest(name); manifest(session);
+                std::optional<CacheSessionKey> key;
+                if (session) { key.emplace(); manifest(*key); }
+                manifest(retention);
+                auto result = program.load_continuation(directory/name);
+                if (!result.continuation || !valid_continuation_summary(result.summary) ||
+                    result.summary.long_anchors.size() > max_long_anchors_) {
+                    if (result.continuation) (void)program.release_continuation(std::move(*result.continuation));
+                    throw std::runtime_error("invalid restored cache continuation or anchor capacity");
+                }
+                CatalogEntry& entry = catalog_[index];
+                entry.state=CatalogState::Catalogued; entry.id=next_continuation_id_++;
+                assign_continuation_summary(entry.summary,result.summary);
+                entry.handle.emplace(std::move(*result.continuation));
+                entry.session=key; entry.retention=retention;
+                migrate_observations(entry,entry.summary,retention);
+                if (key) (void)publish_session(*key,index,entry.id,entry.revision,index+1);
+            }
+            rebuild_prefix_index(); return count;
+        } catch (...) {
+            for (auto& entry : catalog_) {
+                if (entry.handle) (void)program.release_continuation(std::move(*entry.handle));
+                clear_catalog_entry(entry);
+            }
+            for (auto& entry : session_index_) entry = {};
+            rebuild_prefix_index(); throw;
+        }
+    }
     ResourceManager(std::uint32_t lane_count, std::uint32_t private_catalog_capacity,
                     std::uint32_t shared_catalog_capacity, bool cache_enabled,
                     std::uint32_t max_long_anchors, ContextMachineCostModel cost_model)

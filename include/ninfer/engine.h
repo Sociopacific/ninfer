@@ -108,6 +108,22 @@ public:
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     [[nodiscard]] bool is_available() const;
 
+    // Persist settled private continuations only; model weights and workspaces stay resident.
+    struct CacheCheckpointStatus {
+        std::uint32_t sessions = 0;
+        double capture_seconds = 0;
+        double durable_seconds = 0;
+        std::uint64_t device_to_host_bytes = 0;
+        double device_to_host_seconds = 0;
+        std::uint64_t payload_bytes_written = 0;
+        bool writing = false;
+        bool durable = false;
+        std::string error;
+    };
+    CacheCheckpointStatus start_cache_save(const std::filesystem::path& directory);
+    CacheCheckpointStatus cache_save_status();
+    std::uint32_t save_cache(const std::filesystem::path& directory);
+    std::uint32_t load_cache(const std::filesystem::path& directory);
     void reset_memory_peaks() noexcept;
 
 private:

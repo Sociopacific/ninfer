@@ -108,6 +108,10 @@ public:
 
     [[nodiscard]] ninfer::RuntimeStats runtime_stats() const { return engine_->runtime_stats(); }
 
+    ninfer::Engine::CacheCheckpointStatus start_cache_save(const std::filesystem::path& directory) { return engine_->start_cache_save(directory); }
+    ninfer::Engine::CacheCheckpointStatus cache_save_status() { return engine_->cache_save_status(); }
+    std::uint32_t save_cache(const std::filesystem::path& directory) { return engine_->save_cache(directory); }
+    std::uint32_t load_cache(const std::filesystem::path& directory) { return engine_->load_cache(directory); }
     [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {

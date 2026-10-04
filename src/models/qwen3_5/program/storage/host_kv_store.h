@@ -89,12 +89,16 @@ public:
     }
 
     [[nodiscard]] std::optional<HostKVExtentReservation>
-    prepare(LogicalKVPageStore& pages, std::span<const LogicalKVPageHandle> membership) {
+    prepare(LogicalKVPageStore& pages, std::span<const LogicalKVPageHandle> membership,
+            bool importing = false) {
         if (membership.empty() || free_count_ == 0 || membership.size() > free_membership_count_) {
             return std::nullopt;
         }
         for (const LogicalKVPageHandle page : membership) {
-            if (!pages.can_pin_source(page) || pages.host_resident(page)) { return std::nullopt; }
+            if (pages.host_resident(page) ||
+                (!importing && !pages.can_pin_source(page)) ||
+                (importing && (!pages.valid(page) || pages.device_resident(page) ||
+                               pages.writer_references(page) != 0))) { return std::nullopt; }
         }
 
         const HostKVPageLayout& layout = page_layout(pages);

@@ -30,6 +30,8 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <unordered_map>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -539,6 +541,8 @@ public:
                                       runtime::CommitObservation observation,
                                       runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] DiscardResult abort_pending(PendingBatch&& pending) noexcept;
+    void save_continuation(const ContinuationHandle& continuation, const std::filesystem::path& path);
+    [[nodiscard]] FinishResult load_continuation(const std::filesystem::path& path);
     [[nodiscard]] FinishResult finish(SequenceHandle sequence) noexcept;
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
@@ -594,6 +598,7 @@ public:
     std::unique_ptr<LogicalKVPageStore> backend_kv_pages;
     std::unique_ptr<KVAddressSpaceStore> backend_kv_addresses;
     std::unique_ptr<HostKVExtentStore> host_kv_extents;
+    std::unordered_map<std::string,std::string> checkpoint_payload_names;
     std::size_t text_host_kv_page_stride    = 0;
     std::size_t backend_host_kv_page_stride = 0;
     std::unique_ptr<qwen3_5::StateImageDevicePool> state_images;

@@ -1,3 +1,6 @@
+#include "core/cache_archive.h"
+#include <chrono>
+#include <string>
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "models/qwen3_5/program/planning/startup.h"
@@ -533,3 +536,267 @@ AdmissionCandidate::identity_assessment() const noexcept {
 }
 
 } // namespace ninfer::models::qwen3_5
+
+namespace ninfer::models::qwen3_5::detail {
+namespace {
+using cache_archive::Reader;
+using cache_archive::Writer;
+const std::string cache_run_id = std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+std::string page_group_name(LogicalKVPageStore& store, std::span<const LogicalKVPageHandle> pages, bool backend) {
+    std::uint64_t key = 1469598103934665603ULL;
+    for (auto page : pages) {
+        key = (key ^ store.descriptor_index(page)) * 1099511628211ULL;
+        key = (key ^ store.content_epoch(page)) * 1099511628211ULL;
+        key = (key ^ store.committed_columns(page)) * 1099511628211ULL;
+    }
+    return std::string(backend ? "mtp-" : "kv-") + cache_run_id + "-" + std::to_string(key) + ".bin";
+}
+void write_payload(const std::filesystem::path& path, const std::byte* bytes, std::size_t count) {
+    const cache_archive::PayloadSpan span{bytes,count};
+    if (!cache_archive::stage_payload(path.string()+".tmp", std::span(&span,1))) {
+        Writer file(path.string() + ".tmp"); file(std::uint64_t(count)); file.bytes(bytes, count); file.close();
+    }
+    if (cache_archive::capture_stats) cache_archive::capture_stats->payload_bytes_written += count;
+    cache_archive::publish(path.string() + ".tmp", path);
+}
+void read_payload(const std::filesystem::path& path, std::byte* bytes, std::size_t count) {
+    Reader file(path); std::uint64_t size; file(size);
+    if (size != count) throw std::runtime_error("cache payload layout mismatch");
+    file.bytes(bytes, count);
+}
+}
+
+void ProgramImpl::save_continuation(const ContinuationHandle& continuation, const std::filesystem::path& path) {
+    cache_archive::PayloadCaptureBarrier capture_barrier;
+    if (has_context_transaction() || pending_transaction_ || !valid_continuation(continuation))
+        throw std::logic_error("cache checkpoint requires a settled continuation");
+    SequenceState& state = continuation_states[ContractAccess::index(continuation)];
+    if (!state.kv || !host_kv_extents || !host_state_images)
+        throw std::runtime_error("cache checkpoint requires Host KV and state pools");
+    device.synchronize();
+    Writer ar(path.string() + ".tmp");
+    ar(std::uint64_t(0x4e494e4341434831ULL));
+    ar(state.execution_frontier); ar(state.ledger_frontier); ar(state.ledger);
+    state.prefix_identity.archive(ar); state.prefix_digests.archive(ar);
+    ar(state.rope_delta); ar(state.text_kv_valid); ar(state.mtp_kv_valid);
+    ar(state.dflash_context_frontier); ar(state.mtp_drafts); ar(state.mtp_draft_count);
+    ar(state.tail_hidden_valid); ar(state.endpoint_valid); ar(state.rewrite_checkpoint);
+    ar(state.rebuild_work); ar(state.rebuild_tail_begin);
+    std::vector<StateImageHandle> images;
+    auto image_id = [&](StateImageHandle handle) -> std::int32_t {
+        if (!state_store->valid(handle)) return -1;
+        auto found = std::find(images.begin(), images.end(), handle);
+        if (found != images.end()) return static_cast<std::int32_t>(found - images.begin());
+        images.push_back(handle); return static_cast<std::int32_t>(images.size()-1);
+    };
+    ar(image_id(state.state.read)); ar(image_id(state.state.write));
+    ar(state.rewrite_state ? image_id(*state.rewrite_state) : -1);
+    ar(std::uint64_t(state.long_anchors.size()));
+    for (auto& anchor : state.long_anchors) {
+        ar(image_id(anchor.state)); ar(anchor.frontier); ar(anchor.ordinal); ar(anchor.rebuild_work);
+    }
+    ar(std::uint64_t(images.size()));
+    for (auto image : images) {
+        std::string name = "state-" + cache_run_id + "-" + std::to_string(state_store->descriptor_index(image)) +
+                           "-" + std::to_string(state_store->content_epoch(image)) + ".bin";
+        const std::string key=(path.parent_path()/name).string();
+        if (auto saved=checkpoint_payload_names.find(key); saved!=checkpoint_payload_names.end()) name=saved->second;
+        ar(name);
+        if (cache_archive::payload_exists(path.parent_path()/name)) continue;
+        if (state_store->residency(image) == StateReplicaResidency::DeviceOnly) {
+            CudaEventTimer timer(device,device.transfer_stream); timer.start();
+            auto transfer = state_store->begin_device_to_host(image, device.transfer_stream);
+            if (!transfer) throw std::runtime_error("checkpoint Host state pool exhausted");
+            CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+            const double seconds=timer.stop_ms()/1000.0;
+            state_store->publish_transfer(std::move(*transfer), true);
+            if (cache_archive::capture_stats) {
+                cache_archive::capture_stats->device_to_host_bytes += host_state_images->layout().image_bytes;
+                cache_archive::capture_stats->device_to_host_seconds += seconds;
+            }
+        }
+        auto view = state_store->checkpoint_host_view(image);
+        write_payload(path.parent_path()/name, view.data, view.layout->image_bytes);
+    }
+    auto save_kv = [&](KVAddressSpaceStore& addresses, LogicalKVPageStore& pages, KVAddressSpaceHandle address, bool backend) {
+        const std::uint32_t frontier = addresses.committed_frontier(address);
+        const std::uint32_t count = frontier ? (frontier + kPagedKVPageSize - 1) / kPagedKVPageSize : 0;
+        const std::size_t stride = host_kv_extents->page_layout(pages).page_stride;
+        ar(frontier); ar(std::uint64_t(stride)); ar(count);
+        for (std::uint32_t begin = 0; begin < count; begin += 64) {
+            std::vector<LogicalKVPageHandle> group;
+            for (std::uint32_t index = begin; index < std::min(count, begin+64); ++index)
+                group.push_back(addresses.logical_page(address, index));
+            std::string name = page_group_name(pages, group, backend);
+            const std::string key=(path.parent_path()/name).string();
+            if (auto saved=checkpoint_payload_names.find(key); saved!=checkpoint_payload_names.end()) name=saved->second;
+            ar(name);
+            for (auto page : group) ar(pages.committed_columns(page));
+            if (cache_archive::payload_exists(path.parent_path()/name)) continue;
+            std::vector<LogicalKVPageHandle> missing;
+            for (auto page : group) if (!pages.host_resident(page)) missing.push_back(page);
+            if (!missing.empty()) {
+                auto reservation = host_kv_extents->prepare(pages, missing);
+                if (!reservation) throw std::runtime_error("checkpoint Host KV pool exhausted");
+                auto sources = host_kv_extents->device_sources(*reservation);
+                CudaEventTimer timer(device,device.transfer_stream); timer.start();
+                pages.physical_pool().copy_to_host(sources, host_kv_extents->writable_view(*reservation), device.transfer_stream);
+                CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+                const double seconds=timer.stop_ms()/1000.0;
+                (void)host_kv_extents->publish(std::move(*reservation));
+                if (cache_archive::capture_stats) {
+                    cache_archive::capture_stats->device_to_host_bytes += stride*missing.size();
+                    cache_archive::capture_stats->device_to_host_seconds += seconds;
+                }
+            }
+            std::vector<cache_archive::PayloadSpan> spans;
+            spans.reserve(group.size());
+            for (auto page : group) {
+                auto replica = pages.host_replica(page);
+                auto view = host_kv_extents->view(replica.extent).subview(replica.page_offset, 1);
+                spans.push_back({view.data(),stride});
+            }
+            const auto temporary=(path.parent_path()/name).string()+".tmp";
+            if (!cache_archive::stage_payload(temporary,spans)) {
+                Writer payload(temporary); payload(std::uint64_t(stride * group.size()));
+                for (auto span : spans) payload.bytes(span.data,span.size);
+                payload.close();
+            }
+            if (cache_archive::capture_stats) cache_archive::capture_stats->payload_bytes_written += stride*group.size();
+            cache_archive::publish(temporary, path.parent_path()/name);
+        }
+    };
+    save_kv(*text_kv_addresses, *text_kv_pages, state.kv->text, false);
+    ar(state.kv->backend.has_value());
+    if (state.kv->backend) save_kv(*backend_kv_addresses, *backend_kv_pages, *state.kv->backend, true);
+    cache_archive::finish_payload_capture();
+    ar.close(); cache_archive::publish(path.string()+".tmp", path);
+    advance_resource_revision();
+}
+
+FinishResult ProgramImpl::load_continuation(const std::filesystem::path& path) {
+    if (has_context_transaction() || pending_transaction_ || !host_state_images || !host_kv_extents)
+        throw std::logic_error("cache restore requires settled Host storage");
+    auto slot = allocate_continuation_slot();
+    if (!slot) throw std::runtime_error("cache continuation slots exhausted");
+    SequenceState& state = continuation_states[*slot];
+    std::vector<StateImageHandle> images;
+    try {
+        Reader ar(path); std::uint64_t magic; ar(magic);
+        if (magic != 0x4e494e4341434831ULL) throw std::runtime_error("invalid cache checkpoint format");
+        ar(state.execution_frontier); ar(state.ledger_frontier); ar(state.ledger);
+        state.prefix_identity.archive(ar); state.prefix_digests.archive(ar);
+        ar(state.rope_delta); ar(state.text_kv_valid); ar(state.mtp_kv_valid);
+        ar(state.dflash_context_frontier); ar(state.mtp_drafts); ar(state.mtp_draft_count);
+        ar(state.tail_hidden_valid); ar(state.endpoint_valid); ar(state.rewrite_checkpoint);
+        ar(state.rebuild_work); ar(state.rebuild_tail_begin);
+        if (state.execution_frontier > capacity || state.ledger_frontier != state.ledger.size())
+            throw std::runtime_error("checkpoint token frontier exceeds capacity");
+        std::int32_t read_id, write_id, rewrite_id; ar(read_id); ar(write_id); ar(rewrite_id);
+        std::uint64_t anchors; ar(anchors);
+        if (anchors > 64) throw std::runtime_error("invalid checkpoint anchor count");
+        std::vector<std::int32_t> anchor_ids(anchors); state.long_anchors.resize(anchors);
+        for (std::size_t i=0; i<anchors; ++i) {
+            ar(anchor_ids[i]); ar(state.long_anchors[i].frontier); ar(state.long_anchors[i].ordinal); ar(state.long_anchors[i].rebuild_work);
+        }
+        std::uint64_t image_count; ar(image_count);
+        if (image_count > anchors+3) throw std::runtime_error("invalid checkpoint state count");
+        std::vector<std::byte> image(host_state_images->layout().image_bytes);
+        for (std::size_t i=0; i<image_count; ++i) {
+            std::string name; ar(name); read_payload(path.parent_path()/name, image.data(), image.size());
+            auto handle=state_store->import_checkpoint(image.data(), image.size());
+            images.push_back(handle);
+            std::string key="state-" + cache_run_id + "-" + std::to_string(state_store->descriptor_index(handle)) +
+                            "-" + std::to_string(state_store->content_epoch(handle)) + ".bin";
+            checkpoint_payload_names[(path.parent_path()/key).string()]=name;
+        }
+        auto get_image = [&](std::int32_t id) {
+            if (id < 0 || static_cast<std::size_t>(id) >= images.size()) throw std::runtime_error("invalid checkpoint state reference");
+            return images[id];
+        };
+        if (state.endpoint_valid) state.state = ActiveStateBinding{.read=get_image(read_id), .write=get_image(write_id)};
+        if (rewrite_id >= 0) { state.rewrite_state = get_image(rewrite_id); state_store->retain_checkpoint_reference(*state.rewrite_state); }
+        for (std::size_t i=0; i<anchors; ++i) {
+            state.long_anchors[i].state = get_image(anchor_ids[i]);
+            state_store->retain_checkpoint_reference(state.long_anchors[i].state);
+        }
+        auto load_kv = [&](KVAddressSpaceStore& addresses, LogicalKVPageStore& pages, bool backend) {
+            std::uint32_t frontier, count; std::uint64_t stride; ar(frontier); ar(stride); ar(count);
+            if (frontier > capacity || count != (frontier+kPagedKVPageSize-1)/kPagedKVPageSize ||
+                stride != host_kv_extents->page_layout(pages).page_stride)
+                throw std::runtime_error("checkpoint KV layout mismatch");
+            std::vector<LogicalKVPageHandle> imported;
+            std::vector<HostKVExtentCapability> extents;
+            imported.reserve(count); extents.reserve((count+63)/64);
+            struct ImportJob {
+                std::string name;
+                std::vector<LogicalKVPageHandle> group;
+                std::unique_ptr<HostKVExtentReservation> reservation;
+                std::future<void> read;
+            };
+            std::deque<ImportJob> jobs;
+            auto finish_job = [&] {
+                auto job=std::move(jobs.front()); jobs.pop_front();
+                job.read.get();
+                extents.push_back(host_kv_extents->publish(std::move(*job.reservation)));
+                checkpoint_payload_names[(path.parent_path()/page_group_name(pages,job.group,backend)).string()]=job.name;
+            };
+            try {
+                for (std::uint32_t begin=0; begin<count; begin+=64) {
+                    std::string name; ar(name);
+                    std::vector<LogicalKVPageHandle> group;
+                    group.reserve(std::min(count-begin,64U));
+                    for (std::uint32_t index=begin; index<std::min(count,begin+64); ++index) {
+                        std::uint32_t columns; ar(columns);
+                        if (columns < std::min(std::uint32_t(kPagedKVPageSize),frontier-index*std::uint32_t(kPagedKVPageSize)))
+                            throw std::runtime_error("checkpoint KV coverage is incomplete");
+                        auto handle=pages.import_host_page(columns);
+                        imported.push_back(handle); group.push_back(handle);
+                    }
+                    auto reservation = host_kv_extents->prepare(pages, group, true);
+                    if (!reservation) throw std::runtime_error("checkpoint Host KV capacity exhausted");
+                    auto view = host_kv_extents->writable_view(*reservation);
+                    const auto filename=path.parent_path()/name;
+                    const auto bytes=stride*group.size();
+                    jobs.push_back(ImportJob{std::move(name),std::move(group),
+                        std::make_unique<HostKVExtentReservation>(std::move(*reservation)),
+                        std::async(std::launch::async,[filename,data=view.data(),bytes] {
+                            read_payload(filename,data,bytes);
+                        })});
+                    if (jobs.size() >= 8) finish_job();
+                }
+                while (!jobs.empty()) finish_job();
+                return addresses.import_host_pages(imported, frontier);
+            } catch (...) {
+                // Async readers finish before reservations and logical pages can be reclaimed.
+                jobs.clear();
+                // Host-only replicas cannot be detached while their logical references exist.
+                // Drop those references first; extents then reclaim the zero-reference descriptors.
+                for (auto page : imported) (void)pages.release(page);
+                for (auto extent : extents) (void)host_kv_extents->release(extent);
+                throw;
+            }
+        };
+        state.kv.emplace(SequenceKVBundle{.text=load_kv(*text_kv_addresses,*text_kv_pages,false)});
+        bool backend; ar(backend);
+        if (backend) {
+            if (!backend_kv_addresses || !backend_kv_pages) throw std::runtime_error("checkpoint speculative mode mismatch");
+            state.kv->backend=load_kv(*backend_kv_addresses,*backend_kv_pages,true);
+        }
+        continuation_slots[*slot].role = ContinuationSlotRole::Catalogued;
+        FinishResult result; populate_continuation_summary(state, result.summary);
+        result.summary.active_references = 0;
+        result.continuation.emplace(ContractAccess::make_continuation(this,*slot,continuation_slots[*slot].generation));
+        result.status = runtime::ConsumeStatus::Consumed; result.disposition=runtime::FinishDisposition::Catalogued;
+        advance_resource_revision(); return result;
+    } catch (...) {
+        release_continuation_slot_best_effort(*slot);
+        for (auto image : images) if (state_store->valid(image) && !state_store->checkpoint_references(image)) (void)state_store->release(image);
+        throw;
+    }
+}
+}
+namespace ninfer::models::qwen3_5 {
+void Program::save_continuation(const ContinuationHandle& continuation, const std::filesystem::path& path) { impl_->save_continuation(continuation,path); }
+FinishResult Program::load_continuation(const std::filesystem::path& path) { return impl_->load_continuation(path); }
+}

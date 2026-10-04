@@ -573,6 +573,31 @@ void HttpServer::register_routes() {
             }
         });
 
+    server_.Post("/cache/save", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            const auto body=nlohmann::json::parse(req.body);
+            const auto started=std::chrono::steady_clock::now();
+            if (body.value("async",false)) {
+                auto status=service_->start_cache_save(body.at("directory").get<std::string>());
+                res.status=202;
+                res.set_content(nlohmann::json{{"sessions",status.sessions},{"capture_seconds",status.capture_seconds},{"device_to_host_bytes",status.device_to_host_bytes},{"device_to_host_seconds",status.device_to_host_seconds},{"payload_bytes_written",status.payload_bytes_written},{"writing",status.writing},{"durable",status.durable}}.dump(),"application/json"); return;
+            }
+            auto count=service_->save_cache(body.at("directory").get<std::string>());
+            res.set_content(nlohmann::json{{"sessions",count},{"seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()}}.dump(),"application/json");
+        } catch (const std::exception& error) { write_exception(res,error); }
+    });
+    server_.Get("/cache/status",[this](const httplib::Request&,httplib::Response& res) {
+        auto status=service_->cache_save_status();
+        res.set_content(nlohmann::json{{"sessions",status.sessions},{"capture_seconds",status.capture_seconds},{"device_to_host_bytes",status.device_to_host_bytes},{"device_to_host_seconds",status.device_to_host_seconds},{"payload_bytes_written",status.payload_bytes_written},{"durable_seconds",status.durable_seconds},{"writing",status.writing},{"durable",status.durable},{"error",status.error}}.dump(),"application/json");
+    });
+    server_.Post("/cache/load", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            const auto body=nlohmann::json::parse(req.body);
+            const auto started=std::chrono::steady_clock::now();
+            auto count=service_->load_cache(body.at("directory").get<std::string>());
+            res.set_content(nlohmann::json{{"sessions",count},{"seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()}}.dump(),"application/json");
+        } catch (const std::exception& error) { write_exception(res,error); }
+    });
     server_.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
         const bool available = service_ != nullptr && service_->is_available();
         res.status           = available ? 200 : 503;

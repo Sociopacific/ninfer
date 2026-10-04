@@ -98,6 +98,12 @@ int main(int argc, char** argv) {
         }
         operational_log.warmup_complete(
             std::chrono::duration<double>(Clock::now() - warmup_started).count());
+        if (!options.cache_restore_directory.empty()) {
+            const auto restore_started = Clock::now();
+            const auto sessions = service.load_cache(options.cache_restore_directory);
+            logger->info("native session cache restored before serving | {} sessions | {:.3f}s", sessions,
+                std::chrono::duration<double>(Clock::now()-restore_started).count());
+        }
         server.attach(service);
 
         g_server.store(&server);

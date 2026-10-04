@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 #include "ninfer/types.h"
 
 #include <stdexcept>

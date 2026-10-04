@@ -1,3 +1,86 @@
+# Native session cache qualified, 2026-10-03
+
+SSH works. Active non-privileged Docker container: qwen38-native-cache-20261003, restart unless-stopped. Lab ninfer-checkpoint-lab-20261002 is stopped. API localhost:18080/v1, model qwen3.8-27b. Remote root /home/sociopacific/llm/qwen38-maxctx-20261002. Binary experiments/ninfer-serve-native-cache, exact args checkpoint-tools/native-server-argv.json.
+
+Current profile: Qwen3.8-27B NVFP4full, vision, NVFP4 KV, YaRN3, MTP7, prefill1024, context/KV712704, concurrency1, pending16, Host KV32768MiB, Host states32, private continuations8, shared prefixes0, anchors0, device cached states0. Actual startup has only58.8MiB GPU free. Real514988 input tokens plus2images verified under new cache; actual710K was verified historically before this implementation, NOT requalified for new persistence. 786432/720896 do not fit. 1M quality is not supported by prior experiments.
+
+Native snapshots contain KV, recurrent/MTP StateImage, prefix/media identity and continuation catalog, NOT weights/workspaces. Owning RAM buffers are staged under executor lock using bounded8 CPU jobs; background owns all bytes and writes/fsyncs after unlock. Immutable payloads reused across restarts. Snapshot-specific catalog/config and CURRENT-last publication preserve previous durable snapshot. Artifact GUID/config checked. Parallel8 reads restore Host reservations; rollback joins readers, drops page logical refs, then frees Host-only extents. Startup --cache-restore-directory /src/checkpoints/native-parallel-500k restores before HTTP listening. Saves are manual; only last published snapshot is auto-restored. Old generations retained; no GC.
+
+Qualified evidence:
+- 3 independent vision sessions40K/40K/48K force spill under65K GPU profile: restart/load0.779s, cache hits for all, 5new prompt tokens each. Unchanged re-save after restart10.28ms and zero payload bytes.
+- 514988-token+2image task: correct6842, blue,611253 after restart; cached prefix514983, prompt preparation about776ms including H2D and5tokens, decode about153tok/s for this response.
+- Initial full main-KV D2H10244884480bytes /0.72542s (~14.12GB/s) on PCIe Gen3x16. Latest parallel capture1.47249s for10402598912bytes staged, but main KV ALREADY Host-resident, only~164MB state D2H. Do not label1.47s first DeviceOnly500K save.
+- Disk durability47.6427s in background for that full save; concurrent correct inference3.2976s. This is not a1.47s durable checkpoint.
+- Controlled cold disk restore: serial24.914s -> parallel10.572s. Warm filesystem cache0.795s. Whole service startup includes weights/GPU init and is much longer. Root SSD Gen4x4; GPU is Gen3x16.
+- 20 consecutive truncated imports rejected with truncated cache checkpoint; artifact mismatch rejected; valid import afterward in SAME process0.762817s, then correct515K vision continuation. Standalone archive tests, remote ninfer-serve build -j and git diff --check pass.
+
+Not tested: first DeviceOnly515K capture with latest parallel implementation; new-cache710K roundtrip; three simultaneous independent500K sessions; power-loss injection; same-length corruption/checksums; broad model quality. Cold physical disk latency remains10.6s. RAM staging duplicates newly written native payloads temporarily. No benchmark/build intentionally running. No commit requested.
+
+Results: native-resumed-test-results.json, native-large-cache-results.json, native-parallel-cache-results.json, native-cold-restore-results.json, native-runtime-probe-results.json, native-parallel-negative-progress.log in local task root. Remote test scripts/logs under checkpoint-tools/ and experiments/. Helpers in /private/tmp already applied: do not rerun blindly. Preserve preexisting WIP. Build only cmake --build /src/build --target ninfer-serve -j after reading applicable AGENTS.
+
+760 approved archive-only Docker volumes deleted previously; archive/configs preserved. PostgreSQL and active foreign workloads untouched. Mac tunnel control socket /private/tmp/homelab-qwen-native-cache.sock; localhost18080 models verified.
+
+## Historical handoff (superseded above)
+
+## Homelab fast 524K profile selected (2026-10-02)
+
+Same 500150-token thinking/image/math task, vision and YaRN3, one RTX5090.
+NVFP4 KV + MTP7: cold143.33 tok/s, 354.94s prefill; cached median136.61
+across3 runs. NVFP4 MTP3: cold131.95-132.06, cached120.40. NVFP4 MTP0:
+53.27. HQ MTP3: cached50.26. All tested outputs correctly returned6842,
+blue,611253; targets also appear in earlier assistant turns, not blind recall.
+Sequences/output lengths differ; not teacher-forced speed or general quality.
+DFlash2 refuses524288 too: selected draft position capacity. GPU source unchanged.
+
+User accepts500K. Active container ninfer-ab-nvfp4-mtp7-20261002, KV capacity
+and context524288, vision, MTP7, restart unless-stopped, localhost18080.
+Live vision smoke and Mac tunnel pass; max_model_len524288. Overfull prompt
+returns400 context_length_exceeded before prefill in0.324s. switch_profile.py
+fast/wide selects measured fast profile or preserved786432 HQ/MTP3.
+Results under deployment experiments; RUNBOOK updated. Disk free fluctuated
+2-5GiB; no unrelated data removed. Raw Nsight2025.4 captures fail import in
+host2025.6, no kernel-share claim; compatible rerun remains outstanding.
+
+## Matched speed control on the same 786K server (2026-10-02)
+
+Same final arithmetic/image task, same thinking/MTP3/HQ/yarn3/vision options,
+shortened archive:79859prompt tokens,149.11decode tok/s,13.22s cold prefill,
+591output tokens,424/498draft acceptance85.1%. Long control:779883prompt,
+35.97decode tok/s,83.2%acceptance.150tok/s is reproduced at80K; the slowdown
+is associated with filled780K history, not merely the configured786K ceiling.
+Different explanatory workload at81007tokens gives96.39tok/s with43.5%
+acceptance. Performance depends on sequence length and draft acceptance/content.
+Updated report and speed80k-matched.json in deployment folder.
+
+## Homelab Linux deployment and 780K vision verification (2026-10-02)
+
+Isolated deployment under ~/llm/qwen38-maxctx-20261002; RTX5090 32GiB,
+driver610.43.02, CUDA13.1.2 devimage. Source c032cfbc, canonical NVFP4full v3
+SHA ac98cd392c84a04b2a21c2f5c3988dece88d20a697ba1de663fb32d5998b8ee9 verified.
+Local Linux patches: include <cmath> in speculative_options.h and guard the
+Windows-only WebUI auto-download implementation; Linux auto mode throws clearly.
+GPU inference source unchanged. Release build and actual HTTP inference pass.
+
+DFlash2 draft7 refuses786432 startup due selected draft position capacity.
+Working configuration: hq-e8-2b, yarn:3, max_context/kv_capacity786432, vision,
+MTP3, concurrency1. About26GiB VRAM,5.33GiB free at startup. Container
+ninfer-maxctx-mtp-20261002 listens localhost18080, restart unless-stopped.
+
+Actual native prompt usage509286 and779608 with image: sealed facts and image
+readout all correct. Second request reuses509357 tokens. Ordinary later turns
+reuse779K and finish in4.6-5.4sec. At780096 a generated latest_events function
+passes4 examples plus nonmutation/copy checks. Overfull prompt rejects before
+prefill with400 context_length_exceeded in0.34sec. Non-thinking arithmetic fails
+both long and short controls. Thinking at779883 gets611253 correctly, coherent
+reasoning/image recall: cold prefill851.38sec, decode35.97t/s,365output tokens.
+Switching thinking did not reuse the earlier non-thinking prompt cache.
+
+Integration smoke uses a source-code archive, repeated initial segment in the
+continuation, simple PNG and short outputs. Not a broad quality benchmark or
+proof of1M. Full results/requests/logs and report in deployment parent folder.
+Disk audit identifies760unreferenced archive-only Neon volumes432.23GiB; no
+volumes deleted, user decision pending.970orphan PGdata volumes preserved.
+
 ## v3 artifacts made canonical on HF (2026-09-16)
 
 The validated v3 bytes now live under the canonical filenames in both HF

@@ -67,3 +67,7 @@ ninfer_add_test(ninfer_jinja_test
 add_test(NAME ninfer_chat_templates_test
   COMMAND ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/text/test_chat_templates.py
           $<TARGET_FILE:ninfer_jinja_test>)
+
+add_executable(ninfer_cache_archive_test "${CMAKE_CURRENT_LIST_DIR}/../test_cache_archive.cpp")
+target_include_directories(ninfer_cache_archive_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME ninfer_cache_archive_test COMMAND ninfer_cache_archive_test)
