@@ -5,7 +5,7 @@ This experimental setup uses Qwen3.8-27B NVFP4full, vision, NVFP4 KV, YaRN3 and 
 Build the serve target using `cmake --build build --target ninfer-serve -j` after configuring the repository's CUDA toolchain. Supply your own compatible `.ninfer` artifact; weights and session snapshots are not included.
 
 ```sh
-python3 tools/homelab/run_native_cache.py --binary "$PWD/build/ninfer-serve" --model /path/to/qwen3_8_27b_nvfp4full.ninfer --cache-directory /path/to/session-cache
+python3 tools/homelab/run_native_cache.py --binary /path/to/ninfer-serve --model /path/to/qwen3_8_27b_nvfp4full.ninfer --cache-directory /path/to/session-cache
 ```
 
 The launcher restores the last published snapshot before HTTP listening when CURRENT exists. Initial startup uses an empty catalog otherwise. This launcher is a portable equivalent of the qualified container argv; the wrapper itself has not been GPU-benchmarked separately.

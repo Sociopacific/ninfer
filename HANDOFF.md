@@ -1,3 +1,7 @@
+## Fork publication, 2026-10-04
+
+User requested push. Native cache implementation, Linux portability fixes and portable launch profile are committed on homelab/qwen38-native-cache and published to https://github.com/Sociopacific/ninfer/tree/homelab/qwen38-native-cache. user-fork points to Sociopacific/ninfer; original origin is preserved. Weights and disk snapshots are excluded. Active server unchanged. ClaudeRipple uses OpenAI-compatible localhost18080 via a persistent Mac SSH tunnel; native Anthropic real-Claude-Code probe failed on multiple System blocks. The session-only claude-qwen launcher verifies client contextWindow712704; default custom-model selection still reports200000.
+
 # Native session cache qualified, 2026-10-03
 
 SSH works. Active non-privileged Docker container: qwen38-native-cache-20261003, restart unless-stopped. Lab ninfer-checkpoint-lab-20261002 is stopped. API localhost:18080/v1, model qwen3.8-27b. Remote root /home/sociopacific/llm/qwen38-maxctx-20261002. Binary experiments/ninfer-serve-native-cache, exact args checkpoint-tools/native-server-argv.json.
